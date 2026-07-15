@@ -1,0 +1,27 @@
+# Reference material — baseline RL implementations we adapt from, not part of the app
+code examples/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Local machine-specific Claude Code settings (permissions etc.)
+.claude/settings.local.json
+
+# Generated output, models & logs
+*.log
+*.pkl
+*.pth
+results/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
