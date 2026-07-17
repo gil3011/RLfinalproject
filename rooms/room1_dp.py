@@ -12,8 +12,8 @@ Page flow:
   Row 1  — About + setup board + 🎮 Environment & Physics controls.
   Row 2  — 🧠 Algorithm parameters + 🚀 Train.
   Row 3  — Training results: a second board with an iteration scrubber, the
-           convergence curve, and a ▶️ Play section (N episodes) reporting the
-           success rate and average return / steps.
+           convergence curve, and a ▶️ Play section animating one episode and
+           reporting its discounted return G, step count, and success/timeout.
 
 The board layout only changes on 🎲 Regenerate (or first load) — not while the
 count sliders are being dragged.
@@ -36,27 +36,30 @@ GOAL = (0, 9)
 
 _ARROW = {"U": "↑", "D": "↓", "L": "←", "R": "→"}
 _STEP_DELAY = {"Slow": 0.45, "Normal": 0.22, "Fast": 0.08}
-_LEGEND = ("🧊 start · 🏁 goal · 🧱 wall · 🟦 slippery ice · "
+_LEGEND = ("🤖 start · 🏁 goal · 🧱 wall · 🟦 slippery ice · "
            "🟥 negative-reward cell")
 
 
-def _make_grid(blocked, ice, negatives, neg_reward, slip):
+def _make_grid(blocked, ice, negatives, neg_reward, slip, goal_reward):
     return IcyGridWorld(
         start=START, goal=GOAL, blocked=blocked, ice=ice,
-        penalties={c: neg_reward for c in negatives}, slip=slip)
+        penalties={c: neg_reward for c in negatives}, slip=slip,
+        goal_reward=goal_reward)
 
 
 @st.cache_data(show_spinner=False)
-def _solve(blocked_t, ice_t, neg_t, neg_reward, slip, gamma, algo):
-    grid = _make_grid(set(blocked_t), set(ice_t), set(neg_t), neg_reward, slip)
+def _solve(blocked_t, ice_t, neg_t, neg_reward, slip, goal_reward, gamma, algo):
+    grid = _make_grid(set(blocked_t), set(ice_t), set(neg_t), neg_reward, slip,
+                      goal_reward)
     _, _, history = ALGORITHMS[algo](grid, gamma=gamma)
     return history
 
 
 @st.cache_data(show_spinner=False)
-def _expected_steps(blocked_t, ice_t, neg_t, neg_reward, slip, gamma, algo):
-    grid = _make_grid(set(blocked_t), set(ice_t), set(neg_t), neg_reward, slip)
-    history = _solve(blocked_t, ice_t, neg_t, neg_reward, slip, gamma, algo)
+def _expected_steps(blocked_t, ice_t, neg_t, neg_reward, slip, goal_reward, gamma, algo):
+    grid = _make_grid(set(blocked_t), set(ice_t), set(neg_t), neg_reward, slip,
+                      goal_reward)
+    history = _solve(blocked_t, ice_t, neg_t, neg_reward, slip, goal_reward, gamma, algo)
     return expected_steps_to_goal(grid, history[-1]["policy"])
 
 
@@ -106,11 +109,16 @@ def _base_grid(grid, V, policy, show_arrows):
                 z[i, j] = np.nan
                 text[i, j] = "🧱"
             elif s == GOAL:
-                z[i, j] = grid.goal_reward
+                # Masked, like the walls. The exit is TERMINAL — you never act
+                # from it — so V(exit) is 0, not the +100 it pays on entry.
+                # Painting the reward here put a number on a scale labelled V(s)
+                # that was not a V at all: every other cell showed the expected
+                # return from standing there, and this one showed a reward.
+                z[i, j] = np.nan
                 text[i, j] = "🏁"
             elif s == START:
                 z[i, j] = V.get(s, 0.0)
-                text[i, j] = "🧊"
+                text[i, j] = "🤖"
             else:
                 z[i, j] = V.get(s, 0.0)
                 text[i, j] = _ARROW[policy[s]] if (show_arrows and policy and s in policy) else ""
@@ -173,14 +181,21 @@ def _env_controls():
     n_negative = st.slider("Negative-reward cells 🟥", 0, 15, 6,
         help="Passable cells (outlined red) that yield a negative reward each time "
         "they are entered. Crossing them lowers their value V(s).")
-    neg_reward = st.slider("Negative reward value", -100, -1, -20,
-        help="Reward received on entering a negative cell — factored into V(s).")
+    neg_reward = st.slider("Negative reward value", -10, -1, -5,
+        help="Reward received on entering a negative cell — factored into V(s). "
+        "Kept small relative to the goal reward so that crossing a red cell is a "
+        "cost worth weighing, never a reason to give up on the exit entirely.")
+    goal_reward = st.slider("Goal reward 🏁", 10, 1000, 100, 10,
+        help="Reward for reaching the exit. Everything else on the board is "
+        "measured against it: raise it and the agent will accept more slipping and "
+        "more red cells to get out; lower it and it turns cautious.")
     regen = st.button("🎲 Regenerate layout", use_container_width=True,
         help="Apply the current counts and reshuffle the placement of blocked, "
         "slippery, and negative cells. The board only changes when you click this.")
     return {
         "n_blocked": n_blocked, "n_slippery": n_slippery, "n_negative": n_negative,
-        "slip": slip, "neg_reward": neg_reward, "regen": regen,
+        "slip": slip, "neg_reward": neg_reward, "goal_reward": goal_reward,
+        "regen": regen,
     }
 
 
@@ -210,9 +225,11 @@ def render():
     with st.expander("ℹ️ About this room", expanded=True):
         st.markdown(
             "Dynamic Programming uses the **full environment model** to compute the "
-            "optimal value function directly. Warm (red) cells near the exit have "
-            "high expected return; that value diffuses backward across the board — "
-            "and is pulled down around the slippery ice and the red penalty cells.\n\n"
+            "optimal value function directly. **Blue** cells near the exit hold high "
+            "expected return; that value diffuses backward across the board, fading "
+            "with distance and turning **red** where the slippery ice and the penalty "
+            "cells drag it negative. The exit itself is masked — it is terminal, so "
+            "you never act from it and its V is 0, not the reward it pays.\n\n"
             "**How to use it:** shape the board under *Environment & Physics* "
             "(🎲 Regenerate for a fresh layout), set the *Algorithm* row, then "
             "**🚀 Train**. After training, scrub the iteration history and "
@@ -234,11 +251,11 @@ def render():
         v = st.session_state["room1_layout"]["version"] + 1
         _regenerate_layout(env, seed=v, version=v)
         st.session_state.pop("room1_trained_sig", None)
-        st.session_state.pop("room1_episode", None)
 
     layout = st.session_state["room1_layout"]
     blocked, ice, negatives = layout["blocked"], layout["ice"], layout["negatives"]
-    grid = _make_grid(blocked, ice, negatives, env["neg_reward"], env["slip"])
+    grid = _make_grid(blocked, ice, negatives, env["neg_reward"], env["slip"],
+                      env["goal_reward"])
 
     zeros = {s: 0.0 for s in grid.all_states()}
     setup_board.plotly_chart(_figure(grid, zeros, {}, show_arrows=False),
@@ -253,21 +270,23 @@ def render():
     st.divider()
     algo, gamma, train = _algo_row()
 
-    sig = (algo, gamma, env["slip"], env["neg_reward"], layout["version"])
+    sig = (algo, gamma, env["slip"], env["neg_reward"], env["goal_reward"],
+           layout["version"])
     if train:
         st.session_state["room1_trained_sig"] = sig
-        st.session_state.pop("room1_episode", None)
     if st.session_state.get("room1_trained_sig") != sig:
         return  # not trained for this configuration — no results yet
 
     # --- Row 3: training results -------------------------------------------- #
     keys = (tuple(sorted(blocked)), tuple(sorted(ice)), tuple(sorted(negatives)))
-    history = _solve(*keys, env["neg_reward"], env["slip"], gamma, algo)
+    history = _solve(*keys, env["neg_reward"], env["slip"], env["goal_reward"],
+                     gamma, algo)
     deltas = [h["delta"] for h in history]
     final = history[-1]
     n = len(history)
 
-    exp_steps = _expected_steps(*keys, env["neg_reward"], env["slip"], gamma, algo)
+    exp_steps = _expected_steps(*keys, env["neg_reward"], env["slip"],
+                                env["goal_reward"], gamma, algo)
 
     st.divider()
     st.markdown("#### Training results")
@@ -323,6 +342,10 @@ def render():
 
     results_caption.caption(f"Showing **{algo}** · iteration {view_it} of {n}")
 
+    # An episode is EPHEMERAL: it lives only in the run that played it. Nothing
+    # goes to session state — a stored rollout outlives the policy it was run
+    # against, so scrubbing to another iteration would redraw a stale trail over
+    # a policy that never produced it.
     if play:
         path, g, outcome = rollout(grid, policy, gamma=gamma, max_steps=max_steps)
         for k in range(len(path)):
@@ -330,36 +353,24 @@ def render():
                           trail=path[: k + 1], agent=path[k])
             results_board.plotly_chart(fig, use_container_width=True, key=f"ep_{k}")
             time.sleep(_STEP_DELAY[speed])
-        st.session_state["room1_episode"] = {
-            "sig": sig, "path": path, "G": g,
-            "steps": len(path) - 1, "outcome": outcome}
-    else:
-        ep = st.session_state.get("room1_episode")
-        if ep and ep.get("sig") == sig and "outcome" in ep:
-            results_board.plotly_chart(
-                _figure(grid, V, policy, show_arrows,
-                        trail=ep["path"], agent=ep["path"][-1]),
-                use_container_width=True, key="results_route")
-        else:
-            results_board.plotly_chart(
-                _figure(grid, V, policy, show_arrows),
-                use_container_width=True, key="results_board")
-
-    # Convergence graph — its own full-width row below the board + play controls.
-    st.plotly_chart(_convergence_curve(deltas, view_it), use_container_width=True)
-
-    ep = st.session_state.get("room1_episode")
-    if ep and ep.get("sig") == sig and "outcome" in ep:
         with episode_slot:
-            if ep["outcome"] == "goal":
+            if outcome == "goal":
                 st.success("🏁 Escaped! The agent reached the exit.")
             else:
                 st.warning("⏱️ Timed out before reaching the exit.")
             e1, e2, e3 = st.columns(3)
-            e1.metric("Return G", f"{ep['G']:+.1f}",
+            e1.metric("Return G", f"{g:+.1f}",
                 help="Discounted episode return G = Σ γ^t·r₍t+1₎ — defined the same "
-                "way as V, so a successful run from the start averages ≈ V(S).")
-            e2.metric("Steps", ep["steps"],
+                "way as V, so a successful run from the start averages ≈ V(S). One "
+                "sample of a stochastic rollout: play again and it will differ.")
+            e2.metric("Steps", len(path) - 1,
                 help="Number of moves before the episode ended.")
-            e3.metric("Result", "✅" if ep["outcome"] == "goal" else "❌",
+            e3.metric("Result", "✅" if outcome == "goal" else "❌",
                 help="Whether the agent reached the exit within the step cap.")
+    else:
+        results_board.plotly_chart(
+            _figure(grid, V, policy, show_arrows),
+            use_container_width=True, key="results_board")
+
+    # Convergence graph — its own full-width row below the board + play controls.
+    st.plotly_chart(_convergence_curve(deltas, view_it), use_container_width=True)

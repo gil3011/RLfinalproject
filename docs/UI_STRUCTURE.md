@@ -13,8 +13,8 @@ fixed. Room 1 (`rooms/room1_dp.py`) is the reference implementation.
 | --- | --- |
 | `streamlit_app.py` | Entry point. Calls `configure_page()`, `room_selector()`, dispatches to `roomN_*.render()`. |
 | `core/layout.py` | `configure_page()` and `room_selector()`. **The sidebar holds only the room selector** — nothing else. |
-| `core/icy_grid.py` | `IcyGridWorld` — the shared discrete env for Rooms 1–4 (blocked / ice / passable-penalty cells) + `generate_layout()`. |
-| `core/episode.py` | `rollout(grid, policy, gamma, max_steps)` — one stochastic episode; returns `(path, G, outcome)` with **discounted** `G = Σ γᵗ·r₍ₜ₊₁₎`. |
+| `core/icy_grid.py` | `IcyGridWorld` — the shared discrete env for Rooms 1–4 (blocked / ice / passable-penalty / teleport cells) + `generate_layout()`, `generate_portals()`. |
+| `core/episode.py` | `rollout(grid, policy, gamma, max_steps)` — one stochastic episode; returns `(path, G, outcome)` with **discounted** `G = Σ γᵗ·r₍ₜ₊₁₎`. Pass `with_landings=True` for a 4th value: the pre-teleport landing cell of each step (Room 2's portal animation). Also `scored_return(G, outcome)` / `TIMEOUT_PENALTY` — the **scoreboard** number (see below). |
 | `algorithms/*.py` | Algorithm implementations, **adapted from `code examples/`** (same math). Extended only to return per-iteration history and expose metrics. |
 | `rooms/roomN_*.py` | One module per room, each exposing a single `render()` function. |
 
@@ -53,7 +53,9 @@ fixed. Room 1 (`rooms/room1_dp.py`) is the reference implementation.
 - **On-page parameters.** All controls live on the page. The sidebar is *only* the
   room selector.
 - **Tooltips everywhere.** Every widget passes a `help="…"` string.
-- **Goal reward = +100**, fixed across all rooms.
+- **Goal reward defaults to +100** in every room, so rooms stay comparable. Rooms 1–2
+  expose it as a `10`–`1000` slider; a new room should default to 100 and only add
+  the slider if it teaches something with it.
 - **Train-gated.** Results/analytics/Play appear only after `🚀 Train`. Changing any
   environment or algorithm parameter (reflected in `sig`) returns the room to its
   pre-train state — never show stale results against a changed setup.
@@ -66,9 +68,46 @@ fixed. Room 1 (`rooms/room1_dp.py`) is the reference implementation.
   (✅ / ❌); the spelled-out outcome goes in the banner above it.
 - **Board.** A Plotly heatmap/canvas with a legend caption; special cell types must
   be visually distinct and named in the legend.
-- **Guard session state.** Episode dicts stored in session must be read defensively
-  (`ep.get("sig") == sig and "<expected key>" in ep`) so a schema change across a
-  code edit can't crash a long-running session.
+- **Mask any cell that has no V.** Walls, teleports, and **the goal** are drawn with
+  `z = np.nan` and an icon only. The goal is terminal — the agent never acts from it,
+  so `V(goal)` is 0, *not* the reward it pays on entry; painting the reward there puts
+  a number on a scale labelled `V(s)` that is not a V. The scale is `RdBu` with
+  `zmid=0`, so **high V is blue** and negative is red — do not describe it as "warm =
+  good" in About text.
+- **Scoreboard ≠ maths.** `scored_return(G, outcome)` adds `TIMEOUT_PENALTY` (−100,
+  mirroring the +100 goal) to a timed-out episode's *reported* return, so giving up
+  always ranks below escaping. It deliberately breaks `G ≈ V(S)` and is for the player
+  only: V, Q, learning updates, curves, and benchmarks must use the raw `G` from
+  `rollout`. Apply it only where the agent actually learns from returns — a DP room
+  never sees a return, so there it would be decoration.
+- **Episodes are ephemeral — never store them in session state.** Render the rollout
+  (animation, banner, metrics) inside the run that played it, from local variables,
+  and let it vanish on the next rerun. A stored episode outlives the policy it was
+  run against: guarding it with the train `sig` is *not enough*, because `sig` does
+  not include the scrubber position, so moving the scrubber would redraw a stale
+  trail over a policy that never produced it. Ephemeral rollouts remove that whole
+  class of staleness by construction rather than by remembering a guard.
+- **Only three things belong in session state:** the generated **layout**, the
+  **trained signature** (the train gate), and widget `key=`s. Nothing else.
+- **The Play grid must be unseeded.** Build the env the rollout runs on with
+  `rng=None` (fresh entropy) so every press slips differently — that is the entire
+  point of watching a stochastic rollout. Only *training* passes an explicit seed,
+  for reproducible curves. Streamlit rebuilds the grid on every rerun, so a fixed
+  seed on the display grid silently replays the identical episode forever.
+
+---
+
+## Environment invariants
+
+- **The exit is always reachable.** Every layout generator must guarantee it, and
+  the guard has to reason about the *folded* transition model, not just walls —
+  Room 2's portals strand the goal without blocking a single cell. Place hazards
+  one at a time, keep each only if `_connected(...)` still holds.
+- **A cell the agent can never stand on is not a state.** Teleport cells are kept
+  out of `grid.actions`, so they never get a DP value or a Q entry.
+- **`.probs` is the true Markov model.** Anything exotic (teleports today) is
+  folded into the destination so the algorithm modules stay ignorant of it.
+  `move()` may expose the pre-fold detail for animation only.
 
 ---
 

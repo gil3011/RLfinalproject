@@ -123,6 +123,36 @@ def policy_iteration(grid, gamma: float = 0.9, theta: float = THETA, max_iters: 
     return dict(V), history[-1]["policy"], history
 
 
+def policy_value(grid, policy, gamma: float, theta: float = THETA,
+                 max_iters: int = 10000):
+    """Exact expected discounted return of following `policy` — per state.
+
+    This is the same iterative policy evaluation `policy_iteration` runs
+    internally, exposed standalone so a room can ask "how good is this policy,
+    really?" about a policy that was learned WITHOUT a model (Room 2's MC).
+
+    That question can't be answered from the learner's own numbers: MC's
+    max_a Q(s,a) is the value of its epsilon-greedy self averaged over its whole
+    history, which understates the greedy policy it actually plays. Evaluating
+    the policy against the true model gives the honest answer. Benchmark only —
+    never fed back to the learner.
+    """
+    _, rewards = grid.get_transition_probs_and_rewards()
+    V = {s: 0.0 for s in grid.all_states()}
+    for _ in range(max_iters):
+        biggest_change = 0.0
+        for s in grid.actions:  # navigable, non-terminal cells
+            a = policy.get(s)
+            if a is None:
+                continue
+            old_v = V[s]
+            V[s] = _q_value(grid, rewards, V, s, a, gamma)
+            biggest_change = max(biggest_change, abs(old_v - V[s]))
+        if biggest_change < theta:
+            break
+    return V
+
+
 def expected_steps_to_goal(grid, policy, tol: float = 1e-6, max_iters: int = 20000):
     """Expected number of steps from the start to the goal under `policy`.
 
