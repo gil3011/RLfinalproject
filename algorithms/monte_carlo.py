@@ -157,7 +157,10 @@ def monte_carlo_control(
         # After the backward pass G is the return from t=0, i.e. from the start.
         returns_[it] = G
         steps_[it] = T - 1
-        success_[it] = states[-1] == grid.goal
+        # Compare the CELL, not the state — correct for Room 2 either way, but a
+        # state is (i, j, k) in a shielded room and this would silently record
+        # every escape as a failure there. See IcyGridWorld's STATE SHAPE note.
+        success_[it] = grid.cell_of(states[-1]) == grid.goal
         eps_[it] = eps
 
         if it in checkpoints:

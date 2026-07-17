@@ -17,7 +17,7 @@ TIMEOUT_PENALTY = -100.0
 
 
 def scored_return(G: float, outcome: str, penalty: float = TIMEOUT_PENALTY):
-    """The episode's score for display: G, plus `penalty` if it never finished.
+    """The episode's score for display: G, plus `penalty` if it TIMED OUT.
 
     Raw G ranks giving up ABOVE escaping the hard way. A run that wanders and
     times out without touching a penalty cell scores G = 0, while a run that
@@ -27,13 +27,19 @@ def scored_return(G: float, outcome: str, penalty: float = TIMEOUT_PENALTY):
     return the optimal policy produces (measured at about -47 on the harshest
     settings), so a timeout genuinely ranks last.
 
+    This keys on "timeout" specifically, NOT on "did not reach the goal". A
+    Room 3 "fell" episode already paid the environment's real cliff penalty, so
+    charging it the timeout penalty too would double-count (-200 for a -100
+    fall) and misreport a decisive death as a failure to decide. Rooms 1-2 are
+    unaffected: with no pits, "not the goal" and "timeout" are the same set.
+
     IMPORTANT: this deliberately breaks `G ≈ V(S)`. The scored return of a
     timed-out episode is NOT its discounted return, and averaging scored returns
     does NOT give the value function. This is a SCOREBOARD number, for the player
     only. Everything doing maths — V, Q, MC's updates, the training curves, the
     DP benchmark — must use the raw G that `rollout` returns, never this.
     """
-    return G + penalty if outcome != "goal" else G
+    return G + penalty if outcome == "timeout" else G
 
 
 def rollout(grid, policy, gamma: float = 1.0, max_steps: int = 200,
@@ -55,7 +61,11 @@ def rollout(grid, policy, gamma: float = 1.0, max_steps: int = 200,
     -------
     path    : list of states visited, start .. terminal (or until the cap).
     G       : discounted return  G = Σ_t γ^t · r_{t+1}  (matches how V is defined).
-    outcome : "goal" if the exit was reached, else "timeout".
+    outcome : "goal"    — reached the exit,
+              "fell"    — ended on a terminal hazard (Room 3's abyss),
+              "timeout" — still wandering when the step cap ran out.
+              A fall is NOT a timeout: it ended the episode decisively and
+              already paid the pit's reward, so `scored_return` leaves it alone.
     landings (only if `with_landings`) : same length as `path`; `landings[k]`
              is the cell step k physically landed on. It differs from `path[k]`
              exactly when a teleport fired, which is the frame an animation must
@@ -82,7 +92,15 @@ def rollout(grid, policy, gamma: float = 1.0, max_steps: int = 200,
         if grid.is_terminal(s):
             break
 
-    outcome = "goal" if s == grid.goal else "timeout"
+    # Compare the CELL, not the state: a shielded room's states are (i, j, k),
+    # so `s == grid.goal` would never be true and every escape would be
+    # misreported as a timeout.
+    if grid.cell_of(s) == grid.goal:
+        outcome = "goal"
+    elif grid.is_terminal(s):
+        outcome = "fell"
+    else:
+        outcome = "timeout"
     if with_landings:
         return path, G, outcome, landings
     return path, G, outcome

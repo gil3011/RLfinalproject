@@ -3,7 +3,10 @@
 Every room in the RL Escape Room app follows the **same page structure** so the
 experience is consistent from room to room. The *parameters* differ per room, and
 some rooms add *extra graphs*, but the skeleton, flow, and conventions below are
-fixed. Room 1 (`rooms/room1_dp.py`) is the reference implementation.
+fixed. Room 1 (`rooms/room1_dp.py`) is the reference implementation for the skeleton;
+Rooms 2–3 add the pattern for a *learning* room (checkpoint scrubber, learning curves,
+DP-benchmark row) — `rooms/room3_sarsa.py` is the most recent and closest to what Room 4
+needs.
 
 ---
 
@@ -13,8 +16,8 @@ fixed. Room 1 (`rooms/room1_dp.py`) is the reference implementation.
 | --- | --- |
 | `streamlit_app.py` | Entry point. Calls `configure_page()`, `room_selector()`, dispatches to `roomN_*.render()`. |
 | `core/layout.py` | `configure_page()` and `room_selector()`. **The sidebar holds only the room selector** — nothing else. |
-| `core/icy_grid.py` | `IcyGridWorld` — the shared discrete env for Rooms 1–4 (blocked / ice / passable-penalty / teleport cells) + `generate_layout()`, `generate_portals()`. |
-| `core/episode.py` | `rollout(grid, policy, gamma, max_steps)` — one stochastic episode; returns `(path, G, outcome)` with **discounted** `G = Σ γᵗ·r₍ₜ₊₁₎`. Pass `with_landings=True` for a 4th value: the pre-teleport landing cell of each step (Room 2's portal animation). Also `scored_return(G, outcome)` / `TIMEOUT_PENALTY` — the **scoreboard** number (see below). |
+| `core/icy_grid.py` | `IcyGridWorld` — the shared discrete env for Rooms 1–4. Cell types: blocked / ice / passable-penalty / teleport / **pit** (terminal hazard) / **shield** (pickup that cancels slip). Generators: `generate_layout()`, `generate_portals()`, `generate_shields()`. |
+| `core/episode.py` | `rollout(grid, policy, gamma, max_steps)` — one stochastic episode; returns `(path, G, outcome)` with **discounted** `G = Σ γᵗ·r₍ₜ₊₁₎`. `outcome` is `"goal"` / **`"fell"`** (ended on a terminal hazard) / `"timeout"`. Pass `with_landings=True` for a 4th value: the pre-teleport landing cell of each step (Room 2's portal animation). Also `scored_return(G, outcome)` / `TIMEOUT_PENALTY` — the **scoreboard** number (see below). |
 | `algorithms/*.py` | Algorithm implementations, **adapted from `code examples/`** (same math). Extended only to return per-iteration history and expose metrics. |
 | `rooms/roomN_*.py` | One module per room, each exposing a single `render()` function. |
 
@@ -68,18 +71,30 @@ fixed. Room 1 (`rooms/room1_dp.py`) is the reference implementation.
   (✅ / ❌); the spelled-out outcome goes in the banner above it.
 - **Board.** A Plotly heatmap/canvas with a legend caption; special cell types must
   be visually distinct and named in the legend.
-- **Mask any cell that has no V.** Walls, teleports, and **the goal** are drawn with
-  `z = np.nan` and an icon only. The goal is terminal — the agent never acts from it,
-  so `V(goal)` is 0, *not* the reward it pays on entry; painting the reward there puts
+- **Mask any cell that has no V.** Walls, teleports, **pits**, and **the goal** are drawn
+  with `z = np.nan` and an icon only. Terminals are terminal — the agent never acts from
+  one, so `V(goal)` is 0, *not* the reward it pays on entry; painting the reward there puts
   a number on a scale labelled `V(s)` that is not a V. The scale is `RdBu` with
   `zmid=0`, so **high V is blue** and negative is red — do not describe it as "warm =
   good" in About text.
+- **Hazards must not read like scenery.** Room 3's abyss shipped as near-black beside
+  dark-grey walls, so *fatal* and *merely impassable* looked identical — the single most
+  important distinction on that board. Give each cell type a colour that is distinct from
+  the others **and** absent from `RdBu`, or it will blend into the value cells around it
+  (Room 3: violet abyss, grey walls, blue ice, green shields, amber agent).
 - **Scoreboard ≠ maths.** `scored_return(G, outcome)` adds `TIMEOUT_PENALTY` (−100,
   mirroring the +100 goal) to a timed-out episode's *reported* return, so giving up
   always ranks below escaping. It deliberately breaks `G ≈ V(S)` and is for the player
   only: V, Q, learning updates, curves, and benchmarks must use the raw `G` from
   `rollout`. Apply it only where the agent actually learns from returns — a DP room
-  never sees a return, so there it would be decoration.
+  never sees a return, so there it would be decoration. It keys on `outcome == "timeout"`,
+  **not** on "didn't reach the goal": a fall already paid the environment's real penalty,
+  so charging it again double-counts.
+- **Never move that penalty into the learning signal.** Measured in Room 3: at −100 it is
+  a no-op; at −500 it collapses the room to 0% escape / 100% timeout. Timing out depends
+  on elapsed steps `t`, which is not in the state — the cap is an artifact of training,
+  not of the world — so the penalty poisons whatever cell the clock stopped in, and it
+  redefines the problem out from under every DP benchmark in the app.
 - **Episodes are ephemeral — never store them in session state.** Render the rollout
   (animation, banner, metrics) inside the run that played it, from local variables,
   and let it vanish on the next rerun. A stored episode outlives the policy it was
@@ -97,14 +112,49 @@ fixed. Room 1 (`rooms/room1_dp.py`) is the reference implementation.
 
 ---
 
+## A state is not always a cell
+
+Up to Room 2 a state **is** a cell, `(i, j)`. From Room 3 it may not be: a shield is
+*carried*, so whether a move slips depends on what was collected earlier, and `(i, j)`
+alone stops being Markov. States become `(i, j, has_shield)` whenever `shields=` is
+passed (`grid.stateful`). Room 4's guard position will pose the same question.
+
+- **Getting this wrong is silent, not loud.** Nothing crashes: DP just computes a `V*`
+  that is quietly an average over "sometimes shielded", and the TD learners chase a
+  self-contradicting target.
+- **The algorithms need no changes.** `value_iteration`, `policy_value`, `sarsa_control`
+  and `monte_carlo_control` all treat a state as an opaque dict key. Keep it that way —
+  augmenting state is the *environment's* job.
+- **Never read coordinates out of a state by unpacking or comparing.** Use
+  `grid.cell_of(s)`, `grid.shield_of(s)`, `grid.start_state()`, `grid.cells()`. In
+  particular `s == grid.goal` and `V[START]` are **bugs** on an augmented board — they
+  are silently always-False / KeyError-or-wrong. Both shipped once: `rollout` reported
+  every escape as a timeout, and a `success[k] = s2 == grid.goal` pinned a KPI at 0%
+  while the agent escaped perfectly.
+- **A board draws one layer at a time.** With shields a cell has two values (before and
+  after pickup). Project with a helper (`room3_sarsa._project`) and name the layer in the
+  UI. Remember the off-layer is largely **off-distribution** for a learner — it only
+  learns states it actually occupies — so those arrows are noise, not opinions.
+
+---
+
 ## Environment invariants
 
 - **The exit is always reachable.** Every layout generator must guarantee it, and
   the guard has to reason about the *folded* transition model, not just walls —
   Room 2's portals strand the goal without blocking a single cell. Place hazards
   one at a time, keep each only if `_connected(...)` still holds.
+- **Reachable is not enough — the route must be one the learner can survive learning.**
+  Pass `pits=` to `generate_layout()` on any board with terminal hazards, or the guard
+  "proves" a path straight through them (measured: **23/40 boards stranded**). Room 3
+  goes further and passes `CLIFF ∪ LEDGE`, demanding a route that avoids the cliff edge
+  entirely: walls that left the ledge as the only approach made **~1 board in 6**
+  unwinnable for SARSA (0%, `V^π` = 0 vs `V*` = 59.9, unfixed by 20,000 episodes) while
+  DP solved them fine — which just reads as a broken room. Constrain the *generator*, not
+  the environment: the ledge stays walkable, so avoiding it remains the agent's choice.
 - **A cell the agent can never stand on is not a state.** Teleport cells are kept
-  out of `grid.actions`, so they never get a DP value or a Q entry.
+  out of `grid.actions`, so they never get a DP value or a Q entry. Same for terminals
+  (goal and pits) and for `(shield_cell, unshielded)`, which entering makes impossible.
 - **`.probs` is the true Markov model.** Anything exotic (teleports today) is
   folded into the destination so the algorithm modules stay ignorant of it.
   `move()` may expose the pre-fold detail for animation only.
@@ -121,6 +171,22 @@ Permitted extensions: iterating only navigable cells (`grid.actions`), recording
 per-iteration `history` of `{V, policy, delta}` snapshots, and exposing exact
 metrics (e.g. `expected_steps_to_goal`, `success_prob_within`). Document any
 deviation from the reference in the module docstring.
+
+So far: `dynamic_programming.py` (Room 1), `monte_carlo.py` (Room 2, from
+`monte_carlo_no_es.py`), `temporal_difference.py` (Room 3 — `sarsa_control`, from
+`sarsa.py`; Room 4's Q-learning belongs beside it). The ε schedule (`CONSTANT` /
+`DECAYING` / `epsilon_at`) is shared from `monte_carlo.py` — import it rather than
+forking it, so the rooms cannot drift apart on what ε means.
+
+- **Decaying ε is the default in every room that exposes the control.** Room 1 is DP and
+  has none.
+- **Never bootstrap off a terminal.** With terminal hazards, both the goal and a fall must
+  end the episode on `Q[s][a] += α·(r − Q[s][a])`. Bootstrapping through a terminal's
+  all-zero Q row silently damps the hazard toward zero.
+- **Model-side benchmarks are display-only.** `policy_value()` gives the *true* value of a
+  learned policy, which is the honest counterweight to a learner's estimate of itself
+  (both MC's and SARSA's understate the greedy policy they play, since Q is the value of
+  the ε-greedy agent). The learner must never see it.
 
 ---
 
@@ -141,6 +207,31 @@ assert not at.exception
 Check: no exceptions pre/post train/play, the expected widgets and KPI metrics are
 present, and env logic (transition sums, reachability, metric-vs-empirical) holds
 in a plain headless script.
+
+**The AppTest gotcha:** the room selector's `st.selectbox` uses a `format_func`, which
+breaks `AppTest.selectbox.set_value(n)`. To test one room headlessly, write a small probe
+script that calls `roomN_*.render()` directly and `AppTest` *that*, rather than switching
+rooms through the selector.
+
+**Test the number the user reads, not the code you just fixed.** A `success[k] = s2 ==
+grid.goal` pinned Room 3's KPI at 0% while the agent escaped perfectly, and 40 passing
+checks sailed past it — because they measured success through `rollout()` (already fixed
+for augmented states) instead of through the `stats` the KPI actually displays. Where you
+can, assert against an **independent witness** rather than a parallel code path: only the
+exit pays a positive reward and only a hazard pays a negative one, so `sign(G)` confirms
+the success/fall flags without reusing their logic.
+
+**Observing a run must not change it.** Snapshot/checkpoint code must draw from its own
+RNG. Room 3's `_snapshot` broke argmax ties off the *training* generator, so the
+checkpoint schedule — derived from `n_episodes` — perturbed the very run it recorded, and
+2,000- and 5,000-episode runs diverged inside their shared first 2,000. Assert that a
+short run and a long run agree over their common prefix, and that the checkpoint count
+does not move the trajectory.
+
+**Suspiciously exact agreement is a bug, not a finding.** A dropped branch made a
+SARSA-vs-Q-learning comparison run SARSA twice, producing bit-identical Q-tables and a
+convincing false conclusion. When two things that should differ agree perfectly, check the
+harness before believing the result.
 
 ---
 

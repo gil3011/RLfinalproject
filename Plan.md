@@ -10,7 +10,7 @@ This document outlines the design and architecture for a Streamlit-based interac
 * **Minimal Text UI:** The user interface must remain clean and visual. Do not include lengthy theoretical or algorithmic explanations on the screen.
 * **Task-Only Descriptions:** Each room will display only a brief 1–2 sentence description of the **task/mission** (e.g., navigating hazards, dodging guards) at the top of the main view.
 * **Tooltip Parameter Explanations:** All controls, hyperparameters, and environment settings (rendered **on the page**, not the sidebar) must use Streamlit's native question-mark tooltip feature (using the `help="..."` argument inside widgets) to explain their mathematical or mechanical purpose.
-* **Goal Reward — default +100, adjustable:** Reaching the exit is the only positive reward in every room. It **defaults to +100** everywhere so rooms stay comparable, but Rooms 1–2 expose it as a slider (`10`–`1000`) because it is the scale everything else is measured against — the negative cells, the slip risk, and the discounting all only mean something relative to it. *(This relaxes the original "fixed +100 in every room" rule. Rooms 3–6 should default to 100 and only expose the slider if the room actually teaches something with it.)*
+* **Goal Reward — default +100, adjustable:** Reaching the exit is the only positive reward in every room. It **defaults to +100** everywhere so rooms stay comparable, but Rooms 1–3 expose it as a slider (`10`–`1000`) because it is the scale everything else is measured against — the negative cells, the slip risk, and the discounting all only mean something relative to it. *(This relaxes the original "fixed +100 in every room" rule. Rooms 4–6 should default to 100 and only expose the slider if the room actually teaches something with it.)* **Expose only ONE side of the ratio.** Room 3 briefly had sliders for both the goal reward and its cliff penalty, which is two controls over one quantity; the hazard is now pinned at −100 and the goal reward is the single scale knob. Note the slider is *inert* in a room whose only rewards are the exit and a hazard — it scales V without moving the policy (measured: 100% escape from goal 10 to 1000). It earns its place by making that scale-invariance visible, not by changing behaviour.
 * **Code Implementation Source:** The underlying RL algorithms must not be coded from scratch; developers must integrate and adapt the baseline algorithm implementations located in the local **`code examples`** directory.
 
 ---
@@ -70,14 +70,29 @@ top-to-bottom as a guided flow:
   it was run against, so moving a scrubber would redraw a stale trail over a policy
   that never produced it. See `docs/UI_STRUCTURE.md`.
 
-* **Scoring a timeout (Room 2 only).** Raw G ranks giving up *above* escaping the
+* **Scoring a timeout (Rooms 2–3).** Raw G ranks giving up *above* escaping the
   hard way: a run that wanders and times out scores 0, while an escape that crossed
-  penalty cells can score negative. Room 2 therefore adds a **−100 timeout penalty**
+  penalty cells can score negative. Those rooms therefore add a **−100 timeout penalty**
   to the *reported* return (`core.episode.scored_return`), mirroring the +100 goal,
   so not finishing always ranks last. This is a **scoreboard** number only — it
-  deliberately breaks `G ≈ V(S)`, and nothing doing maths (V, Q, MC's updates, the
-  curves, the DP benchmark) may use it. Room 1 does **not** do this: its agent is DP
+  deliberately breaks `G ≈ V(S)`, and nothing doing maths (V, Q, the learners' updates,
+  the curves, the DP benchmark) may use it. Room 1 does **not** do this: its agent is DP
   and never sees a return at all, so a penalty on G there would be pure decoration.
+
+* **It penalises `outcome == "timeout"`, NOT "didn't reach the goal".** Once a room has
+  its own terminal hazards (Room 3's abyss), a fall has *already* paid the environment's
+  real penalty, so charging it the scoreboard penalty too double-counts (−200 for a −100
+  fall) and misreports a decisive death as a failure to decide. Rooms 1–2 are unaffected:
+  with no pits the two conditions describe the same set.
+
+* **Keep the "didn't finish" penalty on the SCOREBOARD — never in the learning signal.**
+  Tested in Room 3: at −100 it is a no-op, and at −500 it *destroys* the room (0% escape,
+  100% timeout). Timing out depends on elapsed steps `t`, and `t` is not in the state —
+  the cap is an artifact of training, not a fact about the world — so the penalty lands on
+  whatever cell the clock happened to stop in and poisons it. It also silently redefines
+  the problem, so the learner would optimise something `V*` does not measure and every DP
+  benchmark in the app would stop meaning anything. The Markov way to punish dithering is
+  a **step cost**; Rooms 1 and 3 both measured one as unnecessary.
 
 ---
 
@@ -153,18 +168,68 @@ top-to-bottom as a guided flow:
 
 ### Room 3: SARSA (On-Policy TD)
 
-* **Task Description:** Carefully cross a narrow, slippery ice bridge suspended over a deep abyss without falling off the edge.
-* **State & Action Space:** 10x10 discrete grid (Cliff Walking layout), 4 directional actions.
+* **Task Description:** Carefully cross a slippery ice ledge suspended over a deep abyss without falling off the edge.
+* **State & Action Space:** 10x10 discrete grid (Cliff Walking layout), 4 directional actions. **Start `(9,0)`, exit `(9,9)`, and the abyss is row 9, columns 1–8** — the start and the exit sit on opposite lips of the same chasm, so the direct route runs along the ledge (row 8) and the safe route detours upward. This geometry *is* the lesson and is therefore **fixed**, not randomized.
+
+> **A fall is TERMINAL — the episode ends.** This is a deliberate departure from Sutton & Barto's Cliff Walking (where a fall costs −100 and *resets to the start* with the episode continuing), and it was chosen over the reset variant for two measured reasons. **(1) It needs no new reward machinery.** A fall resolves *to* the cliff cell, so `IcyGridWorld`'s existing resulting-state reward lookup carries the −100 correctly — verified: entering `(9,4)` returns exactly `-100.0` and `game_over` is `True`. The reset variant does **not** work: see the trap below. **(2) It is dramatically more robust to ε.** Measured at cliff = −100, γ = 0.95, α = 0.1: the terminal cliff reaches **94–96% success at ε = 0.10, ε = 0.30, and decaying ε alike**, whereas a *passable* penalty cell scores **0% at ε = 0.10** (3 goal-hits in 3,000 episodes).
+
+> **⚠️ Trap — do not "restore" the classic reset-to-start cliff without fixing the reward fold.** A reset cliff is a penalty cell that is *also* a teleport, and `IcyGridWorld.rewards` is keyed by the **resulting** state while `_build_probs` folds a teleport into its destination. So a fall resolves to `start`, the reward is looked up *at* `start`, and it is **0.0** — measured: `move()` onto the cliff returns `0.0` and every DP reward on that transition is `0.0`. The agent cannot feel the cliff at all. Rooms 1–2 never exposed this because Room 2's portals deliberately carry **no** reward; Room 3 would have been the first room to put a reward on a transient cell. The fix (prototyped and verified, not merged — nothing needs it today) is to attribute rewards to the **physical landing** cell and fold them as a conditional expectation, `E[r|s,a,s'] = Σ_l p(l)·R(l) / Σ_l p(l)`. It must genuinely *average*, not copy: with an icy start, action `R` reaches `start` both by hitting the cliff (−100, p = 0.9) **and** by bumping the wall (0, p = 0.05), giving `E[r] = -94.737`. It must also guard zero mass — at slip = 0 the model still emits zero-probability slip outcomes, which divide by zero. Verified against reality once fixed: exact `V*(S) = 42.371` vs 4,000 rollouts at `42.522 ± 0.399`.
+
 * **On-page Controls (with tooltips):**
-* **Environment:** Slip probability (`0.0` to `0.8`), cliff fall penalty (`-10` to `-100` plus step reset). **Goal Reward: +100**.
-* **Algorithm:** Learning rate ($\alpha$) between `0.01` and `0.5`, training episodes, epsilon mode selector.
+* **Environment:** **blocked cells** (`0`–`20`, default `8`, as in Room 1), **slippery cells** (`0`–`40`, default `20`), slip probability (`0.0`–`0.8`, **default `0.1`**), **shields** (`0`–`2`, default `1`), **goal reward** (`10`–`1000`, default `100`, as in Rooms 1–2), and **🎲 Regenerate layout** — which reshuffles the walls, ice and shields. The abyss, start, and exit never move.
 
+> **The cliff fall is FIXED at −100; the goal reward is the slider.** Both were briefly exposed, which was a mistake: only the *ratio* between them means anything, so two sliders just move the same quantity twice. The fall is pinned to −100 to mirror the standardized +100 exit and the −100 scoreboard penalty for never getting out — falling and giving up cost the same — leaving the goal reward as the one honest scale control, exactly as Rooms 1–2 have it.
 
-* **KPI Metrics:** Total cumulative cliff falls during training, stabilized average reward, safe path step length.
+> **🛡️ Shields change what a STATE IS — this is the room's one deep change.** A shield is *carried*, so whether a move slips depends on what was picked up earlier: the cell alone is **not Markov**, and states become `(i, j, has_shield)`. Getting this wrong is silent, not loud — DP would compute a `V*` that is quietly an average over "sometimes shielded", and the TD learners would chase a self-contradicting target. `IcyGridWorld` therefore augments the state itself (`shields=` ⇒ `stateful`), and the **algorithms need no changes at all**: `value_iteration`, `policy_value` and `sarsa_control` already treat a state as an opaque dict key. Only code reading coordinates out of a state must use `cell_of()` / `shield_of()` / `start_state()` instead of unpacking — `rollout`'s `s == grid.goal` and `success_prob_within`'s `grid.start` both had to change, or every escape would have been misreported as a timeout. Verified: `V(shielded) ≥ V(unshielded)` on all 90 shared cells, shielded moves on ice have exactly one outcome at p=1.0, and the augmented model matches reality (exact `V^π` 37.79 vs 3,000 rollouts at 37.80 ± 0.05).
+
+> **The shield is a TEMPTATION, not a free upgrade — and that is the point.** Measured over 5 boards: *holding* one is worth **+6.7 (slip 0.1) to +12.7 (slip 0.8)** at the start, yet the optimal policy detours to collect it on only **1 of 5 boards**, and at slip 0.8 on **none**. Fetching it costs more discounting than the immunity returns. So the room does not *claim* the shield is good; the benchmark row computes, per board, what holding one is worth and whether `V*` actually bothers — an honest question with an exact answer, which is exactly what having Room 1's DP on tap is for. An earlier draft asserted "any detour on the shielded layer is pure ε-caution"; measurement killed it (see below).
+
+> **⚠️ The shielded layer is mostly off-distribution — do not read it as SARSA's considered opinion.** SARSA only learns `(cell, shielded=1)` for cells it actually reaches *while holding* a shield. Tracing its greedy policy from `(start, shielded=1)` — a state a shielded agent has no reason to occupy — returned "never crosses" on 3 of 5 seeds: unvisited noise, not caution. The honest trace starts from the real `start_state()`. This killed the tidy claim that the shielded layer isolates ε-caution from physics (it also turned out that at slip 0.3 the optimal crosses the ledge *without* the shield at all, so there is no such isolation to show). The UI now says this out loud rather than inviting the user to over-read those arrows.
+* **Algorithm:** Learning rate ($\alpha$, `0.01`–`0.5`, default `0.1`), discount $\gamma$ (`0.5`–`0.99`, default `0.95`), training episodes, max steps per training episode, and an exploration mode selector — **Decaying ε (default**, `1.0` → `0.05`, decay `0.998`) vs. **Constant ε** (default `0.30` when chosen), then **🚀 Train**.
+
+> **Decaying ε is the default in every room that has the control** (Rooms 2 and 3; Room 1 is DP and has no ε). In Room 3 the measurements independently favour it: decaying produces the **most cautious policy of any setting swept — 63% of `V*`**, below every constant ε including 0.30 — which is precisely the behaviour this room exists to show. It is also the setting Room 2 found reliable on sparse reward, so the two rooms now agree.
+
+> **Exploration still matters more than it looks — the magnitude of the cliff is what bites, not the penalty per se.** The start sits *on* the abyss row, so a harsh cliff teaches the agent to flee the entire bottom of the board — and fleeing is also the direction of the exit. At ε = 0.10, cliff values of 0, −1 and −10 all reach 100% and only −100 collapses; with a *passable* penalty that is fatal (0%), while the terminal cliff survives it (94–96% at every ε). Constant ε = 0.30 remains the best of the constant options for legibility.
+
+* **KPI Metrics:** Total cumulative cliff falls during training, success rate and mean return over the last 100 episodes, and the **start-state value V(S)** at the viewed checkpoint. As in Room 2, report the learned policy's **true** value from `policy_value()` beside SARSA's own estimate — the two disagree for the same reason (Q is the value of the *ε-greedy* agent, not of the greedy policy ▶️ Play runs).
 * **Visualizations:**
-* Cumulative cliff falls chart showing leveling-off as safety rules are learned.
-* Real-time Q-table overlay showing directional arrows inside each grid cell, highlighting SARSA's conservative tendency to point away from the hazard.
-* **▶️ Play Episode:** Animate the learned policy crossing the bridge, showing SARSA hugging the safe interior away from the cliff edge.
+* **Cumulative cliff falls chart.** It levels off but **never reaches zero** — measured 7–25 falls in the last 100 episodes across ε settings. Slip and ε both keep pushing the agent in; that residual is honest and worth not hiding.
+* Q-table arrow overlay showing SARSA's conservative tendency to point away from the hazard, plus the value heatmap. **Cliff cells are terminal, so they are masked (`z = np.nan`, icon only)** exactly like the goal — the agent never acts from one, so it has no V.
+* **DP benchmark row**, mirroring Room 2: SARSA's estimate, the policy's true `V^π(S)`, and `V*(S)` side by side. **Room 3 does NOT train Q-learning** — that contrast is Room 4's reveal (see the note there).
+* **▶️ Play Episode:** animates the greedy (ε = 0) policy crossing the ledge. A fall is a **third outcome**, not a timeout — see the required shared change below.
+
+> **Slip partially confounds the room's own lesson — say so rather than hide it.** "SARSA points away from the hazard" is only a fact *about SARSA* if the optimal policy hugs the ledge. It does at slip = 0: measured `V*` crosses the abyss span on **row 8** (the ledge) while SARSA detours to **row 1** (`V^π` 29.20 vs `V*` 59.87). But by slip = 0.1 the *optimal* policy has already backed off to **row 7**, and SARSA crosses at row 6 — only one row apart, so the visual contrast is real but muted. This is why the DP benchmark row matters: it shows the user what optimal actually does at their slip setting, instead of letting them credit SARSA for caution the physics demanded. **The About text should nudge the user to slide slip to 0 to see the pure textbook effect.** (Measured with Q-learning for reference, not shipped: at slip = 0 it hugs row 8 and hits `V^π` = 59.87 = `V*` exactly.)
+
+* **Implementation Notes:** Adapt `code examples/sarsa.py` (on-policy TD control). Its update is `Q[s][a] += α·(r + γ·Q[s2][a2] − Q[s][a])`, bootstrapping off the action *actually taken next* — that is the whole room. Required deviations, documented in the module docstring:
+* **No bootstrap off a terminal.** The reference's `while not grid.game_over()` loop never forms a target from a terminal state. With the cliff terminal, both the goal and a fall must use `Q[s][a] += α·(r − Q[s][a])`. Bootstrapping off a terminal's all-zero Q row silently damps the −100.
+* **Checkpointed history + seeded RNG**, exactly as Room 2 does, for the scrubber and for reproducibility across `st.cache_data` evictions. The display/Play grid stays **unseeded**.
+* ⚠️ **Snapshotting must use a SEPARATE RNG from training.** `_snapshot` breaks argmax ties randomly; drawing those from the training generator lets the checkpoint schedule perturb the run it is meant to be observing. Since the schedule derives from `n_episodes`, a 2,000- and a 5,000-episode run **silently diverged inside their common first 2,000 episodes** — caught by an impossible measurement (2 wins at 2,000 episodes vs 4,658 at 5,000, which cannot fit in the extra 3,000). This alone accounted for most of an apparent "decaying ε fails at the defaults" result. Observing a run must not change it.
+* ⚠️ **When comparing on-policy vs off-policy anywhere, assert the two actually differ.** A dropped `kind` branch made a SARSA-vs-Q-learning harness silently run SARSA twice; it produced bit-identical Q-tables (364/364 entries, max difference exactly `0.0`) and a plausible-looking "the lesson is destroyed" result. Three exact ties is not a finding, it is a bug. ~16% of non-terminal updates have `Q[s2][a2] ≠ max_a Q[s2,a]`, so any correct comparison **must** diverge.
+
+**Shared-code changes this room requires:**
+* **`core/icy_grid.py` — optional `shields=`,** which switches states to `(i, j, k)` (see the note above). Off by default, so Rooms 1–2 keep plain `(i, j)` states and are untouched. Adds `cell_of()`, `shield_of()`, `start_state()`, `cells()`, `is_shield()`, and `generate_shields()` (which keeps a pickup only if it is reachable *and* can still reach the goal without crossing a pit — an unreachable shield is not a hazard, just a lie drawn on the board).
+* ⚠️ **`generate_layout()` must be passed `pits=` on a board that has them.** Its wall guard calls `_connected`, which without pits will happily "prove" a route straight through the abyss and so certify a wall that seals the only SAFE path. **Measured: 23 of 40 boards are stranded** at 20 walls without it, and 0 of 40 with it. This is the same bug class as Room 2's portals, in the opposite direction. It also gained `exclude=` so nothing is drawn on the abyss.
+* ⚠️ **Room 3 passes `pits = CLIFF ∪ LEDGE`, demanding a route that avoids the ledge — not merely a route.** The exit has exactly one entrance, `(8,9)`, so walls that block the descent down column 9 leave row 8 (every cell of it touching the abyss) as the *only* approach. SARSA, whose entire character is refusing to walk beside a cliff, then never escapes: **measured 0% success and `V^π` = 0 against `V*` = 59.9, and 20,000 episodes does not fix it** (2–4 wins total) — while DP solves the same board fine, because it has the model and never had to survive learning. This hit **~1 board in 6**, which just reads as a broken room. With the guard: **0/12 pathological boards, and all 8 walls still place on every seed.** The ledge stays fully walkable in the environment — this constrains the *generator* only, so any detour SARSA takes remains a choice it made, which is the lesson.
+* **`core/icy_grid.py` — multi-terminal support.** `is_terminal()` hardcodes `s == self.goal`. Room 3 needs terminal *hazard* cells (e.g. an optional `pits={cell: reward}`): `is_terminal` returns true for the goal **or** a pit; pits join `self.rewards`; and `self.actions` already excludes terminals, so pits correctly stop being states. Rooms 1–2 pass nothing and are unaffected.
+* **`_connected()` must treat pits as impassable.** A fall ends the episode, so a path *through* the abyss is not a path. The reachability guard must exclude pits or it will certify an unsolvable board — the same class of bug Room 2's portals caused, in the opposite direction.
+* **`core/episode.py` — a fall is a third outcome.** `rollout()` computes `outcome = "goal" if s == grid.goal else "timeout"`, so a fall is **reported as a timeout** — verified: a suicidal policy returns `outcome='timeout'` having ended on a cliff cell. It needs `"fell"`. And `scored_return()` adds `TIMEOUT_PENALTY` whenever `outcome != "goal"`, which would hit a fall with a **second** −100 (−200 total) on top of the one the environment already paid. It must key on `outcome == "timeout"` instead. Rooms 1–2 are unaffected (with no pits, `!= "goal"` and `== "timeout"` are equivalent).
+* **Verify the DP metrics against pits.** `expected_steps_to_goal()` and `success_prob_within()` were written when the goal was the only terminal; confirm they treat a fall as an absorbing non-goal outcome rather than assuming every episode eventually reaches the exit.
+
+> **A learnable "didn't finish" penalty was investigated and REJECTED — there is nothing to fix, and it breaks what it touches.** The worry is reasonable: with the exit worth as little as 10 against a −100 fall, surely the agent should refuse to cross and loiter for a safe 0? **It never does.** Measured across 12 corners of the sliders (γ ∈ {0.5, 0.7, 0.9, 0.95} × goal ∈ {10, 100} × slip ∈ {0.1, 0.8}): **100% escape in every single one**, with only ~25 of 4,000 training episodes timing out (0.6%). The reason is structural — loitering pays exactly 0 while escaping pays *something*, so `V*(S)` stays positive (5.32 at goal 10; still 0.002 at γ = 0.5 / goal 10 / slip 0.8), and γ scales the numbers without changing which way the arrows point. Room 1's "giving up" problem needs *passable* penalty cells lining the route; a terminal cliff you simply walk around cannot create it.
+>
+> Adding the penalty to the **learning signal** anyway was measured: at −100 it is a **no-op** (100% → 100%; training timeouts 21 → 37). At −500 it is **catastrophic** — the greedy policy collapses to **0% escape / 100% timeout**, with training timeouts exploding 21 → 1,044. The failure is instructive and predictable: **timing out depends on elapsed steps `t`, and `t` is not in the state.** The step cap is an artifact of training, not a fact about the world. So the penalty is charged to whichever cell the clock happened to run out in, poisoning arbitrary states, which causes more timeouts, which poisons more states. It also silently redefines the problem: the learner would optimise something `V*` does not measure, so the room could report a policy "beating" `V*` and the whole DP benchmark would stop meaning anything.
+>
+> The Markov way to punish dithering is a **step cost** — a real reward on every transition that DP prices exactly (`V*(S)` 5.32 → −4.03 at −1.0/step). It also changes no behaviour here (100% throughout), which is the same conclusion Room 1 reached when it built and removed one. **So the −100 for not finishing stays exactly where it is: on the scoreboard** (`core.episode.scored_return`), where it costs nothing to be right and reads as a deliberate mirror of the cliff — fall −100, give up −100, escape positive.
+
+**Measured defaults (ice-by-count × episodes sweep, 3 seeds, slip 0.1, cliff −100, γ 0.95, α 0.1, ε 0.30):**
+
+* **Ice count barely changes the room — 🟦 20 is a safe default.** Exact `V*(S)` by count: **59.87 (0) → 53.92 (10) → 52.87 (20) → 52.35 (30) → 51.90 (40)**. Nearly the whole effect lands in the first 10 cells and then plateaus, because scattered ice rarely falls on the critical path. SARSA reached **100% success at every count**, and the greedy policy never fell. Ice-by-count is therefore *much* gentler than the "ice everywhere" configuration the earlier probes used (`V*` 40.17) — those numbers were the pessimistic extreme, not the shipped board.
+* **Training is effectively free — ~0.9–1.1 s for 5,000 episodes** (vs ~10 s for Room 2's MC at the same count), because a terminal cliff plus a wall-free board makes episodes short. Room 3 can afford generous episode counts; **default 2,000**.
+* **More episodes does NOT reliably improve the policy** — `V^π` as a share of `V*` runs **51–84%**, non-monotone in episode count (e.g. ice 0: 61%, 51%, 65%, 62% at 500/1k/2k/5k). This is not underfitting to be tuned away: with constant ε, SARSA converges to the **ε-soft** optimum, not `V*`, and that residual gap **is** the room's lesson. Do not "fix" it by raising the episode cap.
+* **Max steps per training episode barely matters** (100/200/300/500 all reach 100% in ~0.4 s) — episodes end quickly against a terminal cliff. **Default 200.**
+* **Cliff falls never reach zero: 10–16 per last-100 episodes** at every setting swept. Slip and ε keep pushing the agent in. The chart should level off at a nonzero floor, and that is honest.
+
+> **ε does NOT cleanly control SARSA's conservatism — do not teach that it does.** The intuitive story ("higher ε ⇒ more exploration risk priced in ⇒ wider detour") was measured and **does not hold monotonically**. `V^π` as a share of `V*` over 5 seeds × 3,000 episodes: **ε 0.05 → 83%, ε 0.10 → 80%, ε 0.30 → 66%, ε 0.50 → 87%, decaying → 63%.** The detour does widen from ε 0.05 to 0.30, but ε 0.50 reverses it and scores best of all — while *decaying* ε, which **ends** at 0.05, produces the **most** conservative policy of any setting, so a low final ε plainly does not mean a bold policy. Variance across seeds is large. This is why **decaying is the default** (widest detour, and consistent with Room 2) — a ranking, not a curve. Any UI text claiming "turn ε up to see more caution" would state something the measurements contradict.
 
 
 
@@ -180,8 +245,11 @@ top-to-bottom as a guided flow:
 
 
 * **KPI Metrics:** Maximum reward achieved on the final trajectory, total guard collisions.
+
+> **Room 4 must train BOTH algorithms on its OWN board.** The comparison below cannot import Room 3's curves: Room 4's environment (moving guard + coins, and a state space extended by the guard position) is not Room 3's, so plotting the two rooms' returns "on the same axes" would compare different MDPs and mean nothing. Run SARSA as a baseline *inside* Room 4, on Room 4's board, with identical hyperparameters — which is also what makes the path-comparison overlay a controlled experiment rather than a coincidence. This is why Room 3 stays pure SARSA and leaves the contrast here. The contrast is confirmed to exist: on Room 3's cliff at slip = 0, Q-learning hugs the ledge and reaches `V^π` = `V*` = 59.87 exactly while SARSA detours and settles at 29.20. **Note it weakens as slip rises** (see Room 3's slip note) — so if Room 4's board is slippery, budget for the contrast being muted, and see Room 3's warning about asserting that the two learners actually diverge.
+
 * **Visualizations:**
-* Comparative reward chart plotting Q-Learning vs. SARSA on the same axes.
+* Comparative reward chart plotting Q-Learning vs. SARSA on the same axes, both trained here.
 * **Path Comparison Overlay:** Visualizing both final paths on the game board simultaneously—Q-Learning's risky, direct edge path vs. SARSA's safe, detour path.
 * **▶️ Play Episode:** Animate the learned policy taking its aggressive edge route past the guard, contrasting with SARSA's cautious detour.
 
@@ -232,7 +300,7 @@ top-to-bottom as a guided flow:
 | --- | --- | --- | --- | --- | --- |
 | **1** | Dynamic Programming | Discrete (10x10) | Full Model (100%) | Mathematically Optimal | Calculating expectations against slip probability |
 | **2** | Monte Carlo | Discrete (10x10) | Model-Free (Episodes) | High Variance / Empirical | Escaping teleport portals and infinite loops |
-| **3** | SARSA (On-Policy) | Discrete (10x10) | Model-Free (Step-by-Step) | **Conservative & Safe** | Surviving a narrow bridge over a cliff |
+| **3** | SARSA (On-Policy) | Discrete (10x10 **× shield flag**) | Model-Free (Step-by-Step) | **Conservative & Safe** | Crossing an icy ledge over a fatal abyss |
 | **4** | Q-Learning (Off-Policy) | Discrete (10x10) | Model-Free (Step-by-Step) | **Aggressive & Risky** | Dodging a moving guard for bonus coins |
 | **5** | Deep Q-Learning | Continuous (10x10m) | Model-Free (NN Approx) | Smooth & Momentum-Aware | Counteracting low friction and wind zones |
 | **6** | Advanced DQL | Continuous + Radar | Limited Sensor Rays | **Generalizable Avoidance** | Navigating dynamic obstacles with radar range $X$ |
