@@ -10,7 +10,7 @@ This document outlines the design and architecture for a Streamlit-based interac
 * **Minimal Text UI:** The user interface must remain clean and visual. Do not include lengthy theoretical or algorithmic explanations on the screen.
 * **Task-Only Descriptions:** Each room will display only a brief 1–2 sentence description of the **task/mission** (e.g., navigating hazards, dodging guards) at the top of the main view.
 * **Tooltip Parameter Explanations:** All controls, hyperparameters, and environment settings (rendered **on the page**, not the sidebar) must use Streamlit's native question-mark tooltip feature (using the `help="..."` argument inside widgets) to explain their mathematical or mechanical purpose.
-* **Goal Reward — default +100, adjustable:** Reaching the exit is the only positive reward in every room. It **defaults to +100** everywhere so rooms stay comparable, but Rooms 1–2 expose it as a slider (`10`–`1000`) because it is the scale everything else is measured against — the negative cells, the slip risk, and the discounting all only mean something relative to it. *(This relaxes the original "fixed +100 in every room" rule. Rooms 3–6 should default to 100 and only expose the slider if the room actually teaches something with it.)*
+* **Goal Reward — default +100, adjustable:** Reaching the exit is the only positive reward in every room. It **defaults to +100** everywhere so rooms stay comparable, but Rooms 1–3 expose it as a slider (`10`–`1000`) because it is the scale everything else is measured against — the negative cells, the slip risk, and the discounting all only mean something relative to it. *(This relaxes the original "fixed +100 in every room" rule. Rooms 4–6 should default to 100 and only expose the slider if the room actually teaches something with it.)* **Expose only ONE side of the ratio.** Room 3 briefly had sliders for both the goal reward and its cliff penalty, which is two controls over one quantity; the hazard is now pinned at −100 and the goal reward is the single scale knob. Note the slider is *inert* in a room whose only rewards are the exit and a hazard — it scales V without moving the policy (measured: 100% escape from goal 10 to 1000). It earns its place by making that scale-invariance visible, not by changing behaviour.
 * **Code Implementation Source:** The underlying RL algorithms must not be coded from scratch; developers must integrate and adapt the baseline algorithm implementations located in the local **`code examples`** directory.
 
 ---
@@ -70,14 +70,29 @@ top-to-bottom as a guided flow:
   it was run against, so moving a scrubber would redraw a stale trail over a policy
   that never produced it. See `docs/UI_STRUCTURE.md`.
 
-* **Scoring a timeout (Room 2 only).** Raw G ranks giving up *above* escaping the
+* **Scoring a timeout (Rooms 2–3).** Raw G ranks giving up *above* escaping the
   hard way: a run that wanders and times out scores 0, while an escape that crossed
-  penalty cells can score negative. Room 2 therefore adds a **−100 timeout penalty**
+  penalty cells can score negative. Those rooms therefore add a **−100 timeout penalty**
   to the *reported* return (`core.episode.scored_return`), mirroring the +100 goal,
   so not finishing always ranks last. This is a **scoreboard** number only — it
-  deliberately breaks `G ≈ V(S)`, and nothing doing maths (V, Q, MC's updates, the
-  curves, the DP benchmark) may use it. Room 1 does **not** do this: its agent is DP
+  deliberately breaks `G ≈ V(S)`, and nothing doing maths (V, Q, the learners' updates,
+  the curves, the DP benchmark) may use it. Room 1 does **not** do this: its agent is DP
   and never sees a return at all, so a penalty on G there would be pure decoration.
+
+* **It penalises `outcome == "timeout"`, NOT "didn't reach the goal".** Once a room has
+  its own terminal hazards (Room 3's abyss), a fall has *already* paid the environment's
+  real penalty, so charging it the scoreboard penalty too double-counts (−200 for a −100
+  fall) and misreports a decisive death as a failure to decide. Rooms 1–2 are unaffected:
+  with no pits the two conditions describe the same set.
+
+* **Keep the "didn't finish" penalty on the SCOREBOARD — never in the learning signal.**
+  Tested in Room 3: at −100 it is a no-op, and at −500 it *destroys* the room (0% escape,
+  100% timeout). Timing out depends on elapsed steps `t`, and `t` is not in the state —
+  the cap is an artifact of training, not a fact about the world — so the penalty lands on
+  whatever cell the clock happened to stop in and poisons it. It also silently redefines
+  the problem, so the learner would optimise something `V*` does not measure and every DP
+  benchmark in the app would stop meaning anything. The Markov way to punish dithering is
+  a **step cost**; Rooms 1 and 3 both measured one as unnecessary.
 
 ---
 
@@ -285,7 +300,7 @@ top-to-bottom as a guided flow:
 | --- | --- | --- | --- | --- | --- |
 | **1** | Dynamic Programming | Discrete (10x10) | Full Model (100%) | Mathematically Optimal | Calculating expectations against slip probability |
 | **2** | Monte Carlo | Discrete (10x10) | Model-Free (Episodes) | High Variance / Empirical | Escaping teleport portals and infinite loops |
-| **3** | SARSA (On-Policy) | Discrete (10x10) | Model-Free (Step-by-Step) | **Conservative & Safe** | Surviving a narrow bridge over a cliff |
+| **3** | SARSA (On-Policy) | Discrete (10x10 **× shield flag**) | Model-Free (Step-by-Step) | **Conservative & Safe** | Crossing an icy ledge over a fatal abyss |
 | **4** | Q-Learning (Off-Policy) | Discrete (10x10) | Model-Free (Step-by-Step) | **Aggressive & Risky** | Dodging a moving guard for bonus coins |
 | **5** | Deep Q-Learning | Continuous (10x10m) | Model-Free (NN Approx) | Smooth & Momentum-Aware | Counteracting low friction and wind zones |
 | **6** | Advanced DQL | Continuous + Radar | Limited Sensor Rays | **Generalizable Avoidance** | Navigating dynamic obstacles with radar range $X$ |
