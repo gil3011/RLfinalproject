@@ -159,6 +159,11 @@ def expected_steps_to_goal(grid, policy, tol: float = 1e-6, max_iters: int = 200
     Solves the hitting-time equations t(s) = 1 + Σ_{s'} P(s'|s, π(s)) · t(s'),
     with t(goal) = 0, by iteration (same shape as policy evaluation). Finite for
     any policy that reaches the goal with probability 1 (e.g. the optimal one).
+
+    ONLY MEANINGFUL WHEN THE GOAL IS THE ONLY TERMINAL (Room 1). Every terminal
+    has t = 0, so on a board with pits this measures expected steps to ANY
+    absorption — counting a fatal fall as a fast arrival. Room 3 must not use it
+    as a "steps to exit" metric.
     """
     t = {s: 0.0 for s in grid.all_states()}
     for _ in range(max_iters):
@@ -172,21 +177,30 @@ def expected_steps_to_goal(grid, policy, tol: float = 1e-6, max_iters: int = 200
             biggest = max(biggest, abs(val - old))
         if biggest < tol:
             break
-    return t[grid.start]
+    return t[grid.start_state()]
 
 
 def success_prob_within(grid, policy, max_steps: int):
     """Probability the start reaches the goal within `max_steps` moves under
-    `policy`. Propagates the state distribution forward, absorbing goal mass."""
-    dist = {grid.start: 1.0}
+    `policy`. Propagates the state distribution forward, absorbing goal mass.
+
+    Mass that lands on any OTHER terminal (a Room 3 pit) is dropped: that run is
+    over and can never reach the exit. Dropping it is not just bookkeeping — the
+    loop below indexes `policy[s]`, and a pit has no policy entry, so carrying
+    the mass forward would raise KeyError.
+    """
+    dist = {grid.start_state(): 1.0}
     reached = 0.0
     for _ in range(max_steps):
         new: dict = {}
         for s, m in dist.items():
             for s2, p in grid.probs[(s, policy[s])].items():
                 new[s2] = new.get(s2, 0.0) + m * p
-        reached += new.pop(grid.goal, 0.0)
-        dist = new
+        # Match on the CELL, not the state: with shields the exit is reachable
+        # both shielded and not, and `grid.goal` is a cell, never a state key.
+        reached += sum(m for s, m in new.items() if grid.cell_of(s) == grid.goal)
+        # Absorb (and discard) mass that fell into a pit — dead runs.
+        dist = {s: m for s, m in new.items() if not grid.is_terminal(s)}
         if not dist:
             break
     return reached
