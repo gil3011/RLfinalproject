@@ -82,14 +82,23 @@ needs.
   important distinction on that board. Give each cell type a colour that is distinct from
   the others **and** absent from `RdBu`, or it will blend into the value cells around it
   (Room 3: violet abyss, grey walls, blue ice, green shields, amber agent).
-- **Scoreboard ≠ maths.** `scored_return(G, outcome)` adds `TIMEOUT_PENALTY` (−100,
-  mirroring the +100 goal) to a timed-out episode's *reported* return, so giving up
-  always ranks below escaping. It deliberately breaks `G ≈ V(S)` and is for the player
-  only: V, Q, learning updates, curves, and benchmarks must use the raw `G` from
-  `rollout`. Apply it only where the agent actually learns from returns — a DP room
-  never sees a return, so there it would be decoration. It keys on `outcome == "timeout"`,
-  **not** on "didn't reach the goal": a fall already paid the environment's real penalty,
-  so charging it again double-counts.
+- **Scoreboard ≠ maths.** `scored_return(G, outcome)` shows the real discounted `G`
+  on a win but a **flat −100 for ANY loss** (fell / caught / timed out), mirroring the
+  +100 goal, so escaping always ranks above every way of failing and all failures tie.
+  It deliberately breaks `G ≈ V(S)` and is for the player only: V, Q, learning updates,
+  and benchmarks must use the raw `G`. It **replaces** G with −100 rather than adding a
+  penalty, so it cannot double-count the −100 a fall/catch already paid (changed
+  2026-07-18 from the old "add penalty on timeout only" behaviour, at the user's request;
+  `LOSS_SCORE` in `core/episode.py`, with `TIMEOUT_PENALTY` kept as a back-compat alias).
+- **The returns CURVE now shows this scored view too (Rooms 3–4, added 2026-07-18).**
+  For player consistency ("−100 for a loss, in training as well"), the returns curve
+  floors every losing training episode to −100 in its **display**. This is a pure
+  display transform: the stored per-episode `stats["returns"]` stay raw, the learners
+  update off per-step rewards (never episode G), and V/Q/benchmark are untouched — so
+  the learned policy is bit-identical with or without it. Consequence to state honestly
+  in the caption: the moving average now sits below `V*` for *two* reasons (ε-caution
+  **and** the −100 loss floor), so it no longer reads as "mean return ≈ V^π". Room 2's
+  curve is still raw.
 - **Never move that penalty into the learning signal.** Measured in Room 3: at −100 it is
   a no-op; at −500 it collapses the room to 0% escape / 100% timeout. Timing out depends
   on elapsed steps `t`, which is not in the state — the cap is an artifact of training,

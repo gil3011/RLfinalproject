@@ -47,6 +47,43 @@ _PERPENDICULAR = {
 }
 
 
+# --------------------------------------------------------------------------- #
+# Pure slip physics, shared by every discrete room.
+#
+# These are free functions rather than methods so a room whose STATE SHAPE this
+# class does not model (Room 4's moving guard needs (i, j, phase, coins), which
+# is a different augmentation from the shield flag below) can reuse the exact
+# same slip distribution instead of copying it. Keeping ONE implementation is
+# deliberate: Room 2's memory records how subtle this distribution is (the
+# zero-probability-outcome landmine), and two copies would drift.
+# --------------------------------------------------------------------------- #
+def step_cell(cell, a, rows, cols, blocked):
+    """Deterministic result of action `a` from `cell`; wall or edge = stay put."""
+    di, dj = _DELTAS[a]
+    ni, nj = cell[0] + di, cell[1] + dj
+    if 0 <= ni < rows and 0 <= nj < cols and (ni, nj) not in blocked:
+        return (ni, nj)
+    return (cell[0], cell[1])
+
+
+def slip_outcomes(cell, a, rows, cols, blocked, slip):
+    """Distribution over the cell physically landed on, applying perpendicular slip.
+
+    `slip` is the total probability of slipping (split evenly across the two
+    perpendicular directions). Slip outcomes are added ONLY when `slip > 0`:
+    emitting zero-probability outcomes leaves landmines for anything that later
+    divides by an outcome's mass (see the Room 3 teleport-reward fold).
+    """
+    outcomes: dict[tuple[int, int], float] = {}
+    intended = step_cell(cell, a, rows, cols, blocked)
+    outcomes[intended] = outcomes.get(intended, 0.0) + (1.0 - slip)
+    if slip > 0.0:
+        for pa in _PERPENDICULAR[a]:
+            slipped = step_cell(cell, pa, rows, cols, blocked)
+            outcomes[slipped] = outcomes.get(slipped, 0.0) + slip / 2.0
+    return outcomes
+
+
 class IcyGridWorld:
     """A grid with blocked walls, per-cell slippery ice, and passable penalties.
 
@@ -222,6 +259,12 @@ class IcyGridWorld:
     def is_pit(self, s) -> bool:
         return self.cell_of(s) in self.pits
 
+    def is_caught(self, s) -> bool:
+        # No moving guard in this env. Defined so the shared episode/rollout code
+        # can classify a terminal state uniformly across rooms — Room 4's
+        # GuardGrid overrides this with a phase-dependent check.
+        return False
+
     def is_shield(self, s) -> bool:
         return self.cell_of(s) in self.shields
 
@@ -239,11 +282,7 @@ class IcyGridWorld:
 
     def _step_cell(self, s, a):
         """Deterministic result of action `a` from `s`; wall or edge = stay put."""
-        di, dj = _DELTAS[a]
-        ni, nj = s[0] + di, s[1] + dj
-        if self.in_bounds(ni, nj) and (ni, nj) not in self.blocked:
-            return (ni, nj)
-        return s
+        return step_cell((s[0], s[1]), a, self.rows, self.cols, self.blocked)
 
     def _build_probs(self):
         """Build the transition model.
@@ -263,16 +302,8 @@ class IcyGridWorld:
             # point of it, and it is exactly why k has to be part of the state.
             slip = self.slip if (self.is_icy(cell) and not k) else 0.0
             for a in ACTION_SPACE:
-                outcomes: dict[tuple[int, int], float] = {}
-                intended = self._step_cell(cell, a)
-                outcomes[intended] = outcomes.get(intended, 0.0) + (1.0 - slip)
-                if slip > 0.0:
-                    # Only when it can actually happen: adding zero-probability
-                    # slip outcomes leaves landmines for anything that divides
-                    # by an outcome's mass.
-                    for pa in _PERPENDICULAR[a]:
-                        slipped = self._step_cell(cell, pa)
-                        outcomes[slipped] = outcomes.get(slipped, 0.0) + slip / 2.0
+                outcomes = slip_outcomes(cell, a, self.rows, self.cols,
+                                         self.blocked, slip)
                 phys[(s, a)] = outcomes
 
                 folded: dict = {}

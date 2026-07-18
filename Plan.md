@@ -10,7 +10,7 @@ This document outlines the design and architecture for a Streamlit-based interac
 * **Minimal Text UI:** The user interface must remain clean and visual. Do not include lengthy theoretical or algorithmic explanations on the screen.
 * **Task-Only Descriptions:** Each room will display only a brief 1–2 sentence description of the **task/mission** (e.g., navigating hazards, dodging guards) at the top of the main view.
 * **Tooltip Parameter Explanations:** All controls, hyperparameters, and environment settings (rendered **on the page**, not the sidebar) must use Streamlit's native question-mark tooltip feature (using the `help="..."` argument inside widgets) to explain their mathematical or mechanical purpose.
-* **Goal Reward — default +100, adjustable:** Reaching the exit is the only positive reward in every room. It **defaults to +100** everywhere so rooms stay comparable, but Rooms 1–3 expose it as a slider (`10`–`1000`) because it is the scale everything else is measured against — the negative cells, the slip risk, and the discounting all only mean something relative to it. *(This relaxes the original "fixed +100 in every room" rule. Rooms 4–6 should default to 100 and only expose the slider if the room actually teaches something with it.)* **Expose only ONE side of the ratio.** Room 3 briefly had sliders for both the goal reward and its cliff penalty, which is two controls over one quantity; the hazard is now pinned at −100 and the goal reward is the single scale knob. Note the slider is *inert* in a room whose only rewards are the exit and a hazard — it scales V without moving the policy (measured: 100% escape from goal 10 to 1000). It earns its place by making that scale-invariance visible, not by changing behaviour.
+* **Goal Reward — default +100, adjustable:** Reaching the exit is the only positive reward in Rooms 1–3, 5 and 6. **Room 4 is the deliberate exception** — its bonus coin is a second positive reward, and it has to be, because the room's whole question is whether a small certain gain is worth a route that can kill you. That question cannot be posed with the exit as the only payout. The exception is scoped to Room 4 and is not a licence to sprinkle rewards elsewhere; note it also forces `R(s,a,s')` on the shared env (see §Room 4). The goal reward **defaults to +100** everywhere so rooms stay comparable, but Rooms 1–3 expose it as a slider (`10`–`1000`) because it is the scale everything else is measured against — the negative cells, the slip risk, and the discounting all only mean something relative to it. *(This relaxes the original "fixed +100 in every room" rule. Rooms 4–6 should default to 100 and only expose the slider if the room actually teaches something with it.)* **Expose only ONE side of the ratio.** Room 3 briefly had sliders for both the goal reward and its cliff penalty, which is two controls over one quantity; the hazard is now pinned at −100 and the goal reward is the single scale knob. Note the slider is *inert* in a room whose only rewards are the exit and a hazard — it scales V without moving the policy (measured: 100% escape from goal 10 to 1000). It earns its place by making that scale-invariance visible, not by changing behaviour.
 * **Code Implementation Source:** The underlying RL algorithms must not be coded from scratch; developers must integrate and adapt the baseline algorithm implementations located in the local **`code examples`** directory.
 
 ---
@@ -70,20 +70,33 @@ top-to-bottom as a guided flow:
   it was run against, so moving a scrubber would redraw a stale trail over a policy
   that never produced it. See `docs/UI_STRUCTURE.md`.
 
-* **Scoring a timeout (Rooms 2–3).** Raw G ranks giving up *above* escaping the
-  hard way: a run that wanders and times out scores 0, while an escape that crossed
-  penalty cells can score negative. Those rooms therefore add a **−100 timeout penalty**
-  to the *reported* return (`core.episode.scored_return`), mirroring the +100 goal,
-  so not finishing always ranks last. This is a **scoreboard** number only — it
-  deliberately breaks `G ≈ V(S)`, and nothing doing maths (V, Q, the learners' updates,
-  the curves, the DP benchmark) may use it. Room 1 does **not** do this: its agent is DP
-  and never sees a return at all, so a penalty on G there would be pure decoration.
+* **Scoring a loss (Rooms 2–4).** Raw G ranks giving up *above* escaping the hard
+  way: a run that wanders and times out scores ~0, while an escape that crossed cost
+  cells can score negative. So the *reported* return (`core.episode.scored_return`)
+  shows a **flat −100 for ANY lost episode** — fell, caught, or timed out — mirroring
+  the +100 exit, so escaping always ranks above every way of failing and all failures
+  tie. This is a **scoreboard** number only — it deliberately breaks `G ≈ V(S)`, and
+  nothing doing maths (V, Q, the learners' updates, the DP benchmark) may use it. The
+  returns *curve* is the one **display** that mirrors it — see the next bullet. Room 1
+  does **not** do this: its agent is DP and never sees a return at all.
 
-* **It penalises `outcome == "timeout"`, NOT "didn't reach the goal".** Once a room has
-  its own terminal hazards (Room 3's abyss), a fall has *already* paid the environment's
-  real penalty, so charging it the scoreboard penalty too double-counts (−200 for a −100
-  fall) and misreports a decisive death as a failure to decide. Rooms 1–2 are unaffected:
-  with no pits the two conditions describe the same set.
+* **It REPLACES G with −100 on any loss; it does not ADD a penalty (changed 2026-07-18,
+  user request: "the G of every loss should be −100 no matter when or how it loses").**
+  The earlier version added −100 only on `outcome == "timeout"` and left a fall/catch
+  showing its raw *discounted* G (~−80 for an early fall, less for a late one) — which
+  is inconsistent across losses and across timing. Replacing rather than adding also
+  means it can never double-count the environment's own −100 that a fall/catch already
+  paid. A win still shows its true discounted G, which (the exit being the only positive
+  reward) is always well above −100, so the ordering "win > any loss" holds.
+
+* **The returns CURVE mirrors this scoring too (Rooms 3–4, 2026-07-18: "−100 for a loss,
+  in training as well").** The returns curve floors every losing *training* episode to
+  −100 in its DISPLAY, so the chart reads like the Play scoreboard. It is a pure display
+  transform — `stats["returns"]` stays raw, the learners update off per-step rewards
+  (never episode G), and V/Q/benchmark are untouched, so the learned policy is identical
+  with or without it (verified). Honest consequence: the moving average now sits below
+  `V*` for two reasons — ε-caution **and** the −100 loss floor — so it no longer reads as
+  "mean return ≈ V^π"; the captions say so. Room 2's curve is still raw (not requested).
 
 * **Keep the "didn't finish" penalty on the SCOREBOARD — never in the learning signal.**
   Tested in Room 3: at −100 it is a no-op, and at −500 it *destroys* the room (0% escape,
@@ -191,11 +204,11 @@ top-to-bottom as a guided flow:
 
 > **Exploration still matters more than it looks — the magnitude of the cliff is what bites, not the penalty per se.** The start sits *on* the abyss row, so a harsh cliff teaches the agent to flee the entire bottom of the board — and fleeing is also the direction of the exit. At ε = 0.10, cliff values of 0, −1 and −10 all reach 100% and only −100 collapses; with a *passable* penalty that is fatal (0%), while the terminal cliff survives it (94–96% at every ε). Constant ε = 0.30 remains the best of the constant options for legibility.
 
-* **KPI Metrics:** Total cumulative cliff falls during training, success rate and mean return over the last 100 episodes, and the **start-state value V(S)** at the viewed checkpoint. As in Room 2, report the learned policy's **true** value from `policy_value()` beside SARSA's own estimate — the two disagree for the same reason (Q is the value of the *ε-greedy* agent, not of the greedy policy ▶️ Play runs).
+* **KPI Metrics:** **training failures broken out by cause** — falls into the abyss vs timeouts (added 2026-07-18 at the user's request: "how many times did the agent fail, by a fall or a timeout") — plus success rate over the last 100 episodes and the learned policy's **true** value V(S) from `policy_value()` at the viewed checkpoint. A caption tallies all episodes as escaped / fell / timed out.
 * **Visualizations:**
 * **Cumulative cliff falls chart.** It levels off but **never reaches zero** — measured 7–25 falls in the last 100 episodes across ε settings. Slip and ε both keep pushing the agent in; that residual is honest and worth not hiding.
 * Q-table arrow overlay showing SARSA's conservative tendency to point away from the hazard, plus the value heatmap. **Cliff cells are terminal, so they are masked (`z = np.nan`, icon only)** exactly like the goal — the agent never acts from one, so it has no V.
-* **DP benchmark row**, mirroring Room 2: SARSA's estimate, the policy's true `V^π(S)`, and `V*(S)` side by side. **Room 3 does NOT train Q-learning** — that contrast is Room 4's reveal (see the note there).
+* **DP benchmark row** — ⚠️ **REMOVED from the UI 2026-07-18 (user: "TMI").** The learned-vs-`V*` side-by-side heatmaps and the three value metrics (SARSA's estimate / true `V^π(S)` / `V*(S)`) are gone. `V*(S)` survives as the dashed reference line on the return curve, and the learned policy's true `V(S)` stays as a KPI; the exact-vs-learned comparison is no longer foregrounded. The code and `policy_value()`/`value_iteration()` machinery remain — only the display was cut. **Room 3 still does NOT train Q-learning** — that contrast is Room 4's reveal.
 * **▶️ Play Episode:** animates the greedy (ε = 0) policy crossing the ledge. A fall is a **third outcome**, not a timeout — see the required shared change below.
 
 > **Slip partially confounds the room's own lesson — say so rather than hide it.** "SARSA points away from the hazard" is only a fact *about SARSA* if the optimal policy hugs the ledge. It does at slip = 0: measured `V*` crosses the abyss span on **row 8** (the ledge) while SARSA detours to **row 1** (`V^π` 29.20 vs `V*` 59.87). But by slip = 0.1 the *optimal* policy has already backed off to **row 7**, and SARSA crosses at row 6 — only one row apart, so the visual contrast is real but muted. This is why the DP benchmark row matters: it shows the user what optimal actually does at their slip setting, instead of letting them credit SARSA for caution the physics demanded. **The About text should nudge the user to slide slip to 0 to see the pure textbook effect.** (Measured with Q-learning for reference, not shipped: at slip = 0 it hugs row 8 and hits `V^π` = 59.87 = `V*` exactly.)
@@ -237,21 +250,213 @@ top-to-bottom as a guided flow:
 
 ### Room 4: Q-Learning (Off-Policy TD)
 
-* **Task Description:** Cross the hazardous bridge while dodging a moving patrol guard and collecting optional bonus coins placed near the abyss.
-* **State & Action Space:** 10x10 discrete grid + dynamic guard position, 4 directional actions.
-* **On-page Controls (with tooltips):**
-* **Environment:** Slip probability, guard patrol speed (Slow/Normal/Fast), coin bonus value (`0.0` to `2.0`). **Goal Reward: +100**.
-* **Algorithm:** Identical hyperparameters to Room 3 ($\alpha$, episodes, exploration rate) to ensure a controlled side-by-side comparison.
+**Status: designed and measured 2026-07-17, NOT yet built.** Everything below that
+carries a number was measured on a scratchpad prototype of the environment
+(`GuardGrid`) driven by the *real* `algorithms/dynamic_programming.py` and a
+prototype `td_control`. The prototype deliberately implements the same interface
+`IcyGridWorld` exposes, which is how we know the shared algorithms need no
+changes. Four of this section's claims are corrections of the sketch that stood
+here before; three more are corrections of measurements taken earlier the same
+day. Read the "claims that died" note at the end before adding anything here.
 
+* **Task Description:** Cross the hazardous ledge over the abyss while a patrol guard sweeps the safe detour, with an optional bonus coin sitting out on the ledge itself.
+* **State & Action Space:** 10x10 discrete grid **× guard patrol phase × coin flag** — states are `(i, j, g, m)`, **not** `(i, j)`. 4 directional actions. See the state-shape note below; the summary table in §4 previously said "Discrete (10x10)" and was simply wrong.
 
-* **KPI Metrics:** Maximum reward achieved on the final trajectory, total guard collisions.
+> **The guard breaks the Markov property exactly as Room 3's shield did.** Whether
+> a move is safe depends on where the guard is *now*, so `(i, j)` alone is not a
+> state. `docs/UI_STRUCTURE.md` ("A state is not always a cell") already predicted
+> this room would pose the question. The answer is the same: **the environment
+> augments the state; the algorithms are not told.** `value_iteration`,
+> `policy_value` and the TD learners treat a state as an opaque dict key and needed
+> **zero** changes against the prototype — verified, not assumed.
 
-> **Room 4 must train BOTH algorithms on its OWN board.** The comparison below cannot import Room 3's curves: Room 4's environment (moving guard + coins, and a state space extended by the guard position) is not Room 3's, so plotting the two rooms' returns "on the same axes" would compare different MDPs and mean nothing. Run SARSA as a baseline *inside* Room 4, on Room 4's board, with identical hyperparameters — which is also what makes the path-comparison overlay a controlled experiment rather than a coincidence. This is why Room 3 stays pure SARSA and leaves the contrast here. The contrast is confirmed to exist: on Room 3's cliff at slip = 0, Q-learning hugs the ledge and reaches `V^π` = `V*` = 59.87 exactly while SARSA detours and settles at 29.20. **Note it weakens as slip rises** (see Room 3's slip note) — so if Room 4's board is slippery, budget for the contrast being muted, and see Room 3's warning about asserting that the two learners actually diverge.
+**Geometry (fixed — it is the lesson, exactly as Room 3's abyss is):** Room 3's
+board is reused — start `(9,0)`, exit `(9,9)`, abyss on row 9 columns 1–8, ledge
+on row 8. Room 4 adds a guard patrolling **column 5, rows 0–7**, back and forth,
+as a cyclic schedule of period **P = 14**. Walls, ice and the coin are reshuffled
+by 🎲 Regenerate; the abyss, the patrol column, start and exit never move.
+
+> **Why a column, and why the FULL column.** Start and exit sit on opposite sides,
+> so every route must cross every column. With the guard on col 5 rows 0–7, the
+> *only* guard-free crossings are row 8 (the ledge) and row 9 (the abyss) — so the
+> room forces a real choice: hug the ledge, or time a crossing. **This does not
+> survive a shorter patrol.** Measured over 5 boards: a rows-3–6 patrol leaves rows
+> 0–2 and 7 free, and a "fast" guard implemented as *skipping two rows per step*
+> occupies only rows 0/2/4/6 — leaving rows 1/3/5/7 free **forever**, which the
+> optimal policy walks straight through (5/5 boards dodged). Both shorter tracks
+> score *better* on `V^π`/`V*` (up to 92–95% vs 76–84%) precisely **because they are
+> degenerate** — the guard has stopped existing. A higher score is not a better room.
+
+> **⚠️ The guard patrol speed selector (Slow/Normal/Fast) is REJECTED — speed is
+> not a free knob, it IS the state space.** Speed lives in the phase, so it changes
+> the state count and it changes the geometry. *Faster* without gaps is impossible:
+> the guard must occupy each row in sequence, so skipping rows is the only way to
+> speed it up, and skipping rows opens permanent free crossings (above). *Slower*
+> means dwelling, which doubles the period to P = 28 and the states to 5,600, where
+> SARSA measured **22%/31%/74%** of `V*` across 3 seeds. Ship the guard at one
+> speed. If a speed control is ever wanted, it must be re-derived, not restored.
+
+* **On-page Controls (with tooltips):** Deliberately mirrors Room 3, so the rooms
+  differ in the *algorithm*, not the dashboard.
+* **Environment:** blocked cells (`0`–`20`, default `8`), slippery cells (`0`–`40`, default `20`), slip probability (`0.0`–`0.8`, default `0.1`), **coin value (`0`–`20`, default `5`)**, **goal reward** (`10`–`1000`, default `100`), and 🎲 Regenerate. **No guard-speed slider** (see above). **No shields** — that is Room 3's lesson, and a fourth state dimension would take states to ~22k.
+* **Algorithm:** identical to Room 3 — α (`0.01`–`0.5`, default `0.1`), γ (`0.5`–`0.99`, default `0.95`), episodes (**default `20,000` — see below, Room 3's 2,000 is far too few here**), max steps per training episode (default `200`), and the shared ε selector with **Decaying as the default** (per the app-wide rule). Both learners get the *same* hyperparameters — that is what makes the comparison controlled.
+
+> **⚠️ The goal-reward slider is NOT inert here, unlike in Room 3.** Room 3 measured
+> it as pure scale (100% escape from goal 10 to 1000) and kept it only to make
+> scale-invariance visible. In Room 4 it sets the **exit : coin ratio**, which is
+> the exact quantity the room is about, so it earns its place by changing behaviour.
+> The fall and the guard are both pinned at **−100** — one side of the ratio only,
+> per the Core UI Rules.
+
+> **Coin value `0`–`20`, default `5` — the sketch's `0.0`–`2.0` was measured and
+> rejected.** The value at which the *optimal* policy detours onto the ledge to
+> collect ranges **1 to 10** across boards × slip × γ (20 configs; it never fails to
+> flip). So `0.0`–`2.0` is not merely weak, it is *marginal*: on some boards inert,
+> on others already enough, so the default lands arbitrarily per board. `0`–`20`
+> spans "ignore the coin" to "obviously take it" on every board measured. At the
+> default board (seed 0, slip 0.1, γ 0.95) the flip sits at **3**: `V*(S)` is 45.56
+> at coin 0, 45.63 at coin 2 (**the optimal ignores the coin entirely**), and 48.80
+> at coin 5, where it walks 6 ledge cells to collect.
+
+> **⚠️ ONE coin, not two — a second coin is not a bigger version of the first.**
+> Two coins measured at **37–49% state-action coverage** vs one coin's **68–98%**,
+> and Q-learning's policy collapsed (46%, 29% and 53% of `V*` at 5k/20k/60k
+> episodes — *non-monotone, and not fixed by 12× the budget*). The cause is not the
+> state count, which was the first and wrong diagnosis (see below): it is that a
+> **coin mask is a history dimension the agent only reaches by deliberately doing a
+> rare thing**, so masks `01`/`10`/`11` stay unvisited, whereas the guard phase
+> cycles with `t` and is covered for free. Adding a *second* coin costs a factor of
+> two in states and buys nothing but an untrained table.
+
+* **KPI Metrics (AS BUILT, updated 2026-07-18 — user: "do the same KPIs as Room 3").**
+  Metric tiles for the **viewed** learner (chosen by the Show-learner radio), matching
+  Room 3's set plus the guard catch: 🕳️ Falls (training) · 🚨 Caught (training) ·
+  ⏱️ Timeouts (training) · Success rate (last 100) · V(S) of this policy, above a tally
+  caption (escaped / fell / caught / timed out over all episodes). Replaced an earlier
+  two-learner table. The head-to-head lives in the falls + returns curves (both learners)
+  and the route caption; `V*(S)` is the return curve's dashed line, not a tile (as Room 3).
+
+> **⚠️ "Maximum reward achieved on the final trajectory" and "total guard
+> collisions" are both REJECTED as KPIs.** The first is one sample of a stochastic
+> rollout — Rooms 2 and 3 both converged on a benchmark row instead, for this exact
+> reason. The second was measured and **does not hold**: an early single-seed result
+> suggested a tidy "SARSA dies to the guard, Q-learning dies to the abyss" split
+> (SARSA 386 catches / 1,734 falls; Q-learning 110 / 3,786). Across **5 seeds the
+> catch counts are noise** — SARSA 164–308, Q-learning 73–1,104, no consistent
+> ordering. **Falls are the signal that survives: Q-learning falls 2–4× more than
+> SARSA on 5/5 boards** (2,981–5,836 vs 5,903–15,802 over 20,000 episodes). That is
+> the classic Cliff-Walking signature and the one number to put on screen.
+
+**Measured defaults (full P=14 track, 1 coin @ 5, slip 0.1, γ 0.95, α 0.1, ε 0.30 constant, 5 seeds):**
+
+* **20,000 episodes, not Room 3's 2,000.** At 5,000 episodes SARSA scores 59% of `V*` with a **standard deviation of 20** — the room would read as random. At 20,000: SARSA 80 (sd 17); at 50,000: 84 (sd 15). Training both learners costs **~7.5 s** at 20,000 (SARSA ~4.6 s + Q-learning ~2.9 s), against Room 2's ~10 s ceiling. Affordable; cache it behind a spinner.
+* **DP is affordable and stays exact:** value iteration over 2,800 states converges in **23 sweeps / ~0.5 s** — cheap enough to keep the exact `V*(S)` on tap for the return-curve reference line and the route caption (the full benchmark *row* was later removed as TMI — see Visualizations).
+* **Lower ε does NOT help — it makes the room worse.** ε of 0.30/0.10/0.05 measured coverage 73–87%/40–59%/39–52% for SARSA. Less exploration means less coverage means a less-trained table. This is the opposite of the intuitive fix and mirrors Room 2's "ε is a sweet spot, not a monotone knob".
+* **Decaying ε (default 1.0 → 0.05, decay 0.9995) is measured and is the shipped default.** Slower decay than Room 3's 0.998 because 20,000 episodes over a ~20× larger state space need exploration kept alive longer. Over 5 boards it trains cleanly and the headline holds: **Q-learning takes the coin 5/5, agrees with optimal 2/5; SARSA takes it 0/5, agrees 3/5; Q-learning falls 2–4× more** (≈2,700–8,000 vs SARSA's ≈1,500–2,000). Decaying ε is *gentler* on falls than constant 0.30 (which drove 3,000–15,000) while preserving the contrast. **Nuance worth keeping honest:** with the central coin worth 5, the optimal takes it on ~2/5 boards, so the two learners err in OPPOSITE directions — Q-learning over-takes, SARSA over-detours — rather than "Q-learning wrong, SARSA right". The room's About text and route caption say this; do not simplify it back.
+
+> **⚠️ THE HEADLINE — and it inverts the sketch that stood here.** The old text
+> promised "Q-Learning's risky, direct edge path vs. SARSA's safe, detour path",
+> implying Q-learning is the clever one. Measured at the defaults over 5 boards:
+> **Q-learning takes the ledge coin on 5/5 boards but agrees with the exact optimal
+> on only 2/5. SARSA agrees with the optimal on 5/5.** So Q-learning is not
+> "aggressive and right" — it is **systematically over-optimistic about the risky
+> route**, and SARSA is the one making the optimal call. The room should teach what
+> was measured: *Q-learning walks the ledge, and the DP answer tells you, per board,
+> whether that was brave or just wrong.* That is a better lesson than the sketch's,
+> and it is the entire reason the room keeps the exact DP answer on tap (as the `V*`
+> reference line and the route caption) — so the learner can be shown to be wrong.
+
+> **⚠️ Do NOT claim Q-learning earns more value.** `V^π` as a share of `V*` over 5
+> seeds: **SARSA 93/91/57/68/60 (mean 74), Q-learning 89/64/78/81/80 (mean 78)** —
+> indistinguishable against that spread, and each wins on some boards. The **route**
+> contrast is robust (5/5 vs 2/5); the **value** contrast is not. Say the first,
+> never the second.
+
+> **Room 4 must train BOTH algorithms on its OWN board.** It cannot import Room 3's
+> curves: Room 4's MDP (guard + coin, augmented state) is not Room 3's, so plotting
+> the two rooms' returns on shared axes would compare different MDPs and mean
+> nothing. Run SARSA as a baseline *inside* Room 4 with identical hyperparameters —
+> that is what makes the path overlay a controlled experiment rather than a
+> coincidence, and it is why Room 3 stays pure SARSA. **Assert the two learners
+> actually diverge** (Room 3 shipped a harness that silently ran SARSA twice):
+> verified on the prototype, `max |ΔQ|` = 100.75/100.0/100.0 across 3 seeds.
 
 * **Visualizations:**
-* Comparative reward chart plotting Q-Learning vs. SARSA on the same axes, both trained here.
-* **Path Comparison Overlay:** Visualizing both final paths on the game board simultaneously—Q-Learning's risky, direct edge path vs. SARSA's safe, detour path.
-* **▶️ Play Episode:** Animate the learned policy taking its aggressive edge route past the guard, contrasting with SARSA's cautious detour.
+* Comparative return chart plotting Q-Learning vs. SARSA on the same axes, both trained here, with a dashed `V*(S)` reference line as in Rooms 2–3.
+* **Cumulative falls chart, one line per learner** — the Cliff-Walking signature (Q-learning's line climbs 2–4× faster on every board measured).
+* **Steps-per-episode chart (added 2026-07-18, user request "like Room 3")** — Room 3's steps curve, but two 50-episode-average lines (Q-learning / SARSA) to match Room 4's two-learner convention rather than Room 3's single-learner scatter. A short early run is a quick death (fall or catch), not a fast escape; the averages settle toward each policy's true path length as escapes take over.
+* **Path Comparison Overlay:** both final greedy paths on one board — Q-learning's ledge/coin route vs SARSA's detour. The board draws **one guard phase at a time**; name the phase in the UI (the same "a board draws one layer at a time" rule shields imposed in Room 3).
+* **DP benchmark row** — ⚠️ **REMOVED from the UI 2026-07-18 (user: "TMI"), same as Room 3.** The learned-vs-`V*` heatmaps and the own-estimate/true/optimal metrics are gone. What survives: `V*(S)` as a compact KPI and as the dashed line on the return curve, and the one-line **route contrast** caption (does the optimal / Q-learning / SARSA take the coin?) — which is the honest per-board answer to the coin's question and the room's actual lesson, so it stays. `value_iteration()`/`policy_value()` remain in the code; only the heavy display was cut.
+* **▶️ Play Episode:** animates the greedy (ε = 0) policy of the selected learner. A **catch is a terminal outcome like a fall** — `rollout` must report it (see below).
+
+**Shared-code changes — AS BUILT (diverged from the design note, deliberately).**
+The design note here said "generalize `IcyGridWorld` to `(i, j, *aug)`". At build
+time that was rejected as the highest-regression-risk option against three working
+rooms: the guard's mechanics are structurally unlike the shield latch (a phase that
+*cycles every step*, and a *phase-dependent terminal*), and cramming them into the
+shield machinery would tangle the shared class. Instead:
+
+* **`core/icy_grid.py` — extract the slip physics to free functions** `step_cell()`
+  and `slip_outcomes()`, and refactor `IcyGridWorld` to call them. This keeps ONE
+  implementation of the (subtle) slip distribution — the thing that MUST stay
+  shared — without forcing Room 4's different state shape into the class. Rooms 1–3
+  re-verified byte-identical (Room 3 `V*(S)` = 53.473 unchanged; Room 2-ish 14.844).
+  Also added a one-line `is_caught(s) → False` so the shared `episode.py` can
+  classify terminals uniformly.
+* **`core/guard_grid.py` — a NEW `GuardGrid` env**, not an extension of
+  `IcyGridWorld`. State `(i, j, g, m)`; reuses `step_cell` / `slip_outcomes`;
+  implements its own `cell_of` / `phase_of` / `mask_of` / `start_state`. The RL
+  algorithms treat the state as an opaque key and needed **zero** changes — verified
+  (`max |ΔQ|` ≈ 100 between the two learners confirms they genuinely diverge). This
+  is the same interface the scratchpad prototype validated.
+* ⚠️ **Rewards ARE a function of the transition, `R(s, a, s')`** (in `GuardGrid._build`
+  / `_reward`), not of the resulting state. A one-shot coin cannot be keyed by `s'`:
+  once collected the bit stays set, so re-entry yields an identical `s'` and would pay
+  forever. The mask **bit flip** is the reward, visible only in `(s, s')`. Same bug
+  class as Room 3's shelved teleport-reward fix. `get_transition_probs_and_rewards()`
+  emits `rewards[(s, a, s2)]` and `_q_value` already consumes it, so **DP needed
+  nothing**.
+* **A guard catch is terminal but is NOT a `pits` entry** — it is phase-dependent, so
+  `is_terminal` consults `is_caught(s) = cell_of(s) == track[phase_of(s)]`. **Catch is
+  co-location at the resulting phase**, which keeps it a pure state property (Markov)
+  and lets `is_terminal` stay one-argument. The SWAP case (agent and guard passing
+  through each other) is a near miss under this model — documented, not modelled; a
+  distinct absorbing "caught" state would be needed and buys nothing measured.
+* **`core/episode.py` — a catch is a fourth outcome `"caught"`**, checked before
+  `"fell"`; `scored_return` leaves it alone exactly as it leaves a fall alone
+  (already paid −100). Also made `rollout`'s landing-tracking conditional on
+  `with_landings` so it no longer requires every grid to expose `last_landing`
+  (`GuardGrid` has no transient landings).
+* **`generate_layout(exclude=CLIFF ∪ track ∪ coin, pits=CLIFF ∪ LEDGE)`** — walls
+  never land on the guard's column (it would walk through walls) or the coin.
+  Coin placed first on the central ledge (cols 3–6) via `place_coin`, then excluded.
+* **`algorithms/temporal_difference.py` — `sarsa_control` and `q_learning_control`
+  now share `_td_control(kind)`**, differing **only** in the bootstrap target
+  (`Q[s2][a2]` vs `max_a Q[s2][a]`). Adapted from `code examples/q_learning.py`.
+  Asserts `kind` is one of the two (Room 3's "run SARSA twice" trap). `stats` gained
+  a `caught` array (all-False on a guard-less grid). **Never bootstraps off a
+  terminal** — same rule as Room 3.
+
+> **⚠️ Claims that died to measurement in this room — three of mine, in one
+> sitting. The pattern is always a metric that looked reasonable.**
+> 1. **"A coin worth 1 flips the route on 19/20 configs."** False. The metric counted
+>    *any* ledge cell on the path, and the route clips `(8,1)` incidentally leaving
+>    the start. Coin 0 and coin 1 produced **byte-identical paths** at `V = 45.55`.
+>    The honest criterion is **coins collected** — they sit mid-ledge and cannot be
+>    touched by accident.
+> 2. **"5,600 states is too many for tabular TD."** False, and nearly written in as a
+>    finding. A *slow guard* at the same 5,600 states holds **92–95%** coverage,
+>    while *two coins* at 5,600 collapses to **37–49%**. It was never the count — it
+>    is which dimension you add (see the one-coin note).
+> 3. **"Median visits per (s,a) is 2–4, so nothing is converged."** Misleading. Median
+>    visits barely moves with the budget (4 → 5 → 5 across a 10× increase) while
+>    SARSA's score climbs 59 → 80 → 84, because visits **concentrate on the learned
+>    path** and the median just measures off-distribution states that do not matter.
+>    A whole-table statistic cannot judge a policy.
+>
+> Add nothing to this section that has not survived a probe designed to kill it.
+> `docs/UI_STRUCTURE.md`'s rule applies with force here: **suspiciously tidy
+> agreement is a bug, not a finding.**
 
 
 
@@ -301,7 +506,7 @@ top-to-bottom as a guided flow:
 | **1** | Dynamic Programming | Discrete (10x10) | Full Model (100%) | Mathematically Optimal | Calculating expectations against slip probability |
 | **2** | Monte Carlo | Discrete (10x10) | Model-Free (Episodes) | High Variance / Empirical | Escaping teleport portals and infinite loops |
 | **3** | SARSA (On-Policy) | Discrete (10x10 **× shield flag**) | Model-Free (Step-by-Step) | **Conservative & Safe** | Crossing an icy ledge over a fatal abyss |
-| **4** | Q-Learning (Off-Policy) | Discrete (10x10) | Model-Free (Step-by-Step) | **Aggressive & Risky** | Dodging a moving guard for bonus coins |
+| **4** | Q-Learning (Off-Policy) | Discrete (10x10 **× guard phase × coin flag**) | Model-Free (Step-by-Step) | **Over-optimistic about risk** | Timing a patrol, or braving the ledge for a coin |
 | **5** | Deep Q-Learning | Continuous (10x10m) | Model-Free (NN Approx) | Smooth & Momentum-Aware | Counteracting low friction and wind zones |
 | **6** | Advanced DQL | Continuous + Radar | Limited Sensor Rays | **Generalizable Avoidance** | Navigating dynamic obstacles with radar range $X$ |
 
