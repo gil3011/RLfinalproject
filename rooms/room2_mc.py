@@ -27,8 +27,8 @@ Portals carry NO reward penalty: being sent back to the start simply delays the
 exit, and the discount γ is what makes that expensive. That is why γ is a control
 here rather than a constant — at γ = 1 a portal would cost nothing at all.
 
-Unlike Room 1, this room has NO step cost, and a timed-out ▶️ Play episode instead
-takes the shared `scored_return` timeout penalty so that giving up always ranks
+Unlike Room 1, this room has NO step cost, and a lost ▶️ Play episode is instead
+scored a flat -100 by the shared `scored_return` so that giving up always ranks
 last on the scoreboard. The split is deliberate: Room 1's agent is DP and never
 sees a return at all — only the model moves it — so a penalty on the reported G
 would be pure decoration there and a step cost is the only thing that can change
@@ -67,7 +67,7 @@ import streamlit as st
 from algorithms.dynamic_programming import policy_value, value_iteration
 from algorithms.monte_carlo import (CONSTANT, DECAYING, monte_carlo_control,
                                     moving_average)
-from core.episode import TIMEOUT_PENALTY, rollout, scored_return
+from core.episode import LOSS_SCORE, rollout, scored_return
 from core.icy_grid import IcyGridWorld, generate_layout, generate_portals
 
 START = (9, 0)
@@ -191,7 +191,7 @@ def _base_grid(grid, V, policy, show_arrows):
 
 
 def _figure(grid, V, policy, show_arrows, trail=None, agent=None,
-            portal_flash=False, height=520, title=None):
+            portal_flash=False, height=520):
     z, text = _base_grid(grid, V, policy, show_arrows)
     fig = go.Figure(go.Heatmap(
         z=z, text=text, texttemplate="%{text}", textfont={"size": 16},
@@ -211,8 +211,8 @@ def _figure(grid, V, policy, show_arrows, trail=None, agent=None,
             hoverinfo="skip", showlegend=False))
     fig.update_layout(
         shapes=_cell_shapes(grid.blocked, grid.ice, set(grid.teleports.keys())),
-        margin={"l": 10, "r": 10, "t": 30 if title else 10, "b": 10},
-        height=height, title=title)
+        margin={"l": 10, "r": 10, "t": 10, "b": 10},
+        height=height)
     fig.update_yaxes(autorange="reversed", showticklabels=False)
     fig.update_xaxes(showticklabels=False)
     return fig
@@ -234,7 +234,7 @@ def _returns_curve(returns, v_star_start, view_ep):
                   annotation_text=f"viewing ep {view_ep}")
     fig.update_yaxes(title="discounted return G")
     fig.update_xaxes(title="episode")
-    fig.update_layout(margin={"l": 10, "r": 10, "t": 30, "b": 10}, height=300,
+    fig.update_layout(margin={"l": 10, "r": 10, "t": 48, "b": 10}, height=300,
                       title="Episode return — MC settles below V* by the ε-gap",
                       legend={"orientation": "h", "y": -0.2})
     return fig
@@ -256,7 +256,7 @@ def _steps_curve(steps, success, view_ep):
     fig.add_vline(x=view_ep, line_dash="dot", line_color="#f59e0b")
     fig.update_yaxes(title="steps to exit")
     fig.update_xaxes(title="episode")
-    fig.update_layout(margin={"l": 10, "r": 10, "t": 30, "b": 10}, height=300,
+    fig.update_layout(margin={"l": 10, "r": 10, "t": 48, "b": 10}, height=300,
                       title="Steps per episode — random wandering → efficient routing",
                       legend={"orientation": "h", "y": -0.2})
     return fig
@@ -271,7 +271,7 @@ def _epsilon_curve(eps, view_ep):
                   annotation_text=f"viewing ep {view_ep}")
     fig.update_yaxes(title="ε (chance of a random move)", rangemode="tozero")
     fig.update_xaxes(title="episode")
-    fig.update_layout(margin={"l": 10, "r": 10, "t": 30, "b": 10}, height=300,
+    fig.update_layout(margin={"l": 10, "r": 10, "t": 48, "b": 10}, height=300,
                       title="Exploration rate — how often the agent ignored its policy")
     return fig
 
@@ -542,8 +542,8 @@ def render():
                 st.warning("⏱️ Timed out before reaching the exit.")
             e1, e2, e3 = st.columns(3)
             e1.metric("Return G", f"{score:+.1f}",
-                help="Discounted episode return G = Σ γ^t·r₍t+1₎. A run that fails "
-                f"to escape also takes a {TIMEOUT_PENALTY:+.0f} timeout penalty, so "
+                help="On a WIN this is the real discounted return G = Σ γ^t·r₍t+1₎. "
+                f"A run that fails to escape scores a flat {LOSS_SCORE:+.0f}, so "
                 "giving up always ranks below escaping. One sample of a stochastic "
                 "rollout: play again and it will differ. (The training curves below "
                 "show the RAW returns MC actually learned from — no penalty.)")
@@ -553,7 +553,7 @@ def render():
                 help="Whether the agent reached the exit within the step cap.")
             if outcome != "goal":
                 st.caption(
-                    f"Includes the {TIMEOUT_PENALTY:+.0f} timeout penalty — the raw "
+                    f"Shown as a flat {LOSS_SCORE:+.0f} for not escaping; the raw "
                     f"discounted return was {G_ep:+.1f}.")
             if portals_hit:
                 st.caption(f"🌀 Sent back to the start {portals_hit}× this run.")
@@ -605,12 +605,12 @@ def render():
 
     b1, b2 = st.columns(2)
     with b1:
+        st.markdown(f"**V_MC — sampled ({view_ep:,} episodes)**")
         st.plotly_chart(
-            _figure(grid, V, policy, show_arrows, height=420,
-                    title=f"V_MC — sampled ({view_ep:,} episodes)"),
+            _figure(grid, V, policy, show_arrows, height=420),
             use_container_width=True, key="room2_bench_mc")
     with b2:
+        st.markdown("**V\\* — computed exactly (DP)**")
         st.plotly_chart(
-            _figure(grid, V_star, pi_star, show_arrows, height=420,
-                    title="V* — computed exactly (DP)"),
+            _figure(grid, V_star, pi_star, show_arrows, height=420),
             use_container_width=True, key="room2_bench_dp")

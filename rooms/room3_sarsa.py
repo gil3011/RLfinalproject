@@ -27,8 +27,8 @@ Measured across 5 random boards: *holding* a shield is worth +6.7 (slip 0.1) to
 +12.7 (slip 0.8) at the start — yet the optimal policy detours to pick one up on
 only 1 of 5 boards, and at slip 0.8 on none of them. Walking to it costs more
 discounting than the immunity gives back. So the honest question the board poses
-is "is this detour worth it?", and DP answers it exactly — which is what the
-benchmark row reports, per board, rather than asserting.
+is "is this detour worth it?", and DP answers it exactly, per board, rather than
+asserting.
 
 A caution about reading the shielded layer: SARSA only learns it on states it
 actually reaches WHILE holding a shield. Arrows on the shielded layer far from
@@ -54,15 +54,16 @@ bootstraps off max_a Q[s2][a] instead and will walk the ledge.
 Honest caveat surfaced in the UI: slip PARTIALLY CONFOUNDS the lesson. "Points
 away from the hazard" is only a fact about SARSA if the OPTIMAL policy hugs the
 ledge. It does at slip = 0 (V* crosses on row 8, SARSA detours to row 1); by
-slip = 0.1 the optimal has already backed off to row 7 itself. That is what the
-DP benchmark row is for — it shows what optimal actually does at the user's slip
-setting instead of letting SARSA take credit for caution the physics demanded.
+slip = 0.1 the optimal has already backed off to row 7 itself. That is why the
+DP V*(S) is still shown (the return-curve reference line and the V(S) KPI) — it
+reveals how far SARSA sits from optimal at the user's slip setting instead of
+letting SARSA take credit for caution the physics demanded.
 
 Page flow follows docs/UI_STRUCTURE.md:
   Row 1 — About + setup board + 🎮 Environment controls.
   Row 2 — 🧠 Algorithm parameters + 🚀 Train.
   Row 3 — Training results: KPIs, a checkpoint scrubber, the results board +
-          ▶️ Play (greedy, eps = 0), the learning curves, and a DP-benchmark row.
+          ▶️ Play (greedy, eps = 0), and the learning curves.
 """
 from __future__ import annotations
 
@@ -75,7 +76,7 @@ import streamlit as st
 from algorithms.dynamic_programming import policy_value, value_iteration
 from algorithms.temporal_difference import CONSTANT, DECAYING, sarsa_control
 from algorithms.monte_carlo import moving_average
-from core.episode import TIMEOUT_PENALTY, rollout, scored_return
+from core.episode import LOSS_SCORE, rollout, scored_return
 from core.icy_grid import IcyGridWorld, generate_layout, generate_shields
 
 START = (9, 0)
@@ -109,28 +110,6 @@ def _make_grid(blocked, ice, shields, slip, goal_reward, seed=None):
         start=START, goal=GOAL, blocked=blocked, ice=ice, shields=shields,
         slip=slip, goal_reward=goal_reward, pits={c: CLIFF_REWARD for c in CLIFF},
         rng=np.random.default_rng(seed))
-
-
-def _dp_collects_shield(grid, policy):
-    """Does the OPTIMAL policy actually detour to pick a shield up on this board?
-
-    Follows the greedy path through the most-likely transition from the real
-    start. Used to answer the shield's only interesting question honestly, per
-    board, instead of asserting a general rule that measurement contradicts.
-    """
-    s, seen = grid.start_state(), set()
-    for _ in range(200):
-        if grid.shield_of(s):
-            return True
-        c = grid.cell_of(s)
-        if c == grid.goal or s in seen or grid.is_pit(c):
-            return False
-        seen.add(s)
-        a = policy.get(s)
-        if a is None:
-            return False
-        s = max(grid.probs[(s, a)].items(), key=lambda kv: kv[1])[0]
-    return False
 
 
 def _project(grid, table, layer):
@@ -276,7 +255,7 @@ def _base_grid(grid, V, policy, show_arrows):
 
 
 def _figure(grid, V, policy, show_arrows, trail=None, agent=None, fell=False,
-            shielded=False, height=520, title=None):
+            shielded=False, height=520):
     """V/policy must be CELL-keyed (run them through `_project` first)."""
     z, text = _base_grid(grid, V, policy, show_arrows)
     fig = go.Figure(go.Heatmap(
@@ -299,8 +278,8 @@ def _figure(grid, V, policy, show_arrows, trail=None, agent=None, fell=False,
             hoverinfo="skip", showlegend=False))
     fig.update_layout(
         shapes=_cell_shapes(grid),
-        margin={"l": 10, "r": 10, "t": 30 if title else 10, "b": 10},
-        height=height, title=title)
+        margin={"l": 10, "r": 10, "t": 10, "b": 10},
+        height=height)
     fig.update_yaxes(autorange="reversed", showticklabels=False)
     fig.update_xaxes(showticklabels=False)
     return fig
@@ -316,28 +295,33 @@ def _falls_curve(falls, view_ep):
                   annotation_text=f"viewing ep {view_ep}")
     fig.update_yaxes(title="cumulative falls into the abyss", rangemode="tozero")
     fig.update_xaxes(title="episode")
-    fig.update_layout(margin={"l": 10, "r": 10, "t": 30, "b": 10}, height=300,
+    fig.update_layout(margin={"l": 10, "r": 10, "t": 48, "b": 10}, height=300,
                       title="Cliff falls — the slope flattens as the ledge is learned")
     return fig
 
 
-def _returns_curve(returns, v_star_start, view_ep):
-    n = len(returns)
+def _returns_curve(returns, success, v_star_start, view_ep):
+    # DISPLAY scoring, matching ▶️ Play: an escape shows its real discounted G,
+    # every loss (fall or timeout) is floored to -100. This is a scoreboard view
+    # only — SARSA never learns from episode G (it updates off per-step rewards),
+    # and the stored stats stay raw, so nothing computational is affected.
+    disp = np.where(success, returns, LOSS_SCORE)
+    n = len(disp)
     x = np.arange(1, n + 1)
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=x, y=returns, mode="markers",
-        marker={"size": 3, "color": "rgba(59,130,246,0.35)"}, name="episode G"))
+        x=x, y=disp, mode="markers",
+        marker={"size": 3, "color": "rgba(59,130,246,0.35)"}, name="episode score"))
     fig.add_trace(go.Scatter(
-        x=x, y=moving_average(returns, _MA_WINDOW), mode="lines",
+        x=x, y=moving_average(disp, _MA_WINDOW), mode="lines",
         line={"color": "#1d4ed8", "width": 2}, name=f"{_MA_WINDOW}-episode average"))
     fig.add_hline(y=v_star_start, line_dash="dash", line_color="#ef4444",
                   annotation_text=f"DP optimal V*(S) = {v_star_start:.1f}")
     fig.add_vline(x=view_ep, line_dash="dot", line_color="#f59e0b")
-    fig.update_yaxes(title="discounted return G")
+    fig.update_yaxes(title="return  (escape = real G · any loss = -100)")
     fig.update_xaxes(title="episode")
-    fig.update_layout(margin={"l": 10, "r": 10, "t": 30, "b": 10}, height=300,
-                      title="Episode return — SARSA settles below V*, and that gap is the caution",
+    fig.update_layout(margin={"l": 10, "r": 10, "t": 48, "b": 10}, height=300,
+                      title="Episode score — escapes climb toward V*, every loss floored at -100",
                       legend={"orientation": "h", "y": -0.2})
     return fig
 
@@ -358,7 +342,7 @@ def _steps_curve(steps, success, view_ep):
     fig.add_vline(x=view_ep, line_dash="dot", line_color="#f59e0b")
     fig.update_yaxes(title="steps in episode")
     fig.update_xaxes(title="episode")
-    fig.update_layout(margin={"l": 10, "r": 10, "t": 30, "b": 10}, height=300,
+    fig.update_layout(margin={"l": 10, "r": 10, "t": 48, "b": 10}, height=300,
                       title="Steps per episode — short runs early are falls, not efficiency",
                       legend={"orientation": "h", "y": -0.2})
     return fig
@@ -390,7 +374,7 @@ def _env_controls():
         "to the exit. A shield is a temptation, not a free upgrade: HOLDING one is "
         "worth roughly +7 to +13 from the start, but walking over to fetch it costs "
         "discounting, and more often than not the optimal policy decides it is not "
-        "worth the trip. The benchmark row works out the answer for your board.")
+        "worth the trip — a call that depends on your exact board.")
     goal_reward = st.slider("Goal reward 🏁", 10, 1000, 100, 10,
         help="Reward for reaching the exit — the only positive reward on the "
         "board. It is the scale everything else is measured against: the fall is "
@@ -398,9 +382,9 @@ def _env_controls():
         "dying. Even at 10 against a -100 fall, escaping still beats loitering — "
         "so the agent goes for it anyway (measured 100% at every setting).")
     st.caption(
-        f"🕳️ The fall is fixed at **{CLIFF_REWARD:+.0f}**, and never getting out "
-        f"scores **{TIMEOUT_PENALTY:+.0f}** — so the slider above moves the one "
-        "ratio that matters.")
+        f"🕳️ The fall is fixed at **{CLIFF_REWARD:+.0f}**, and every loss scores "
+        f"**{LOSS_SCORE:+.0f}** on the scoreboard — so the slider above moves the "
+        "one ratio that matters.")
     regen = st.button("🎲 Regenerate layout", use_container_width=True,
         help="Reshuffle the walls, ice, and shields. The abyss, start, and exit "
         "never move — that geometry is what the room is about.")
@@ -548,7 +532,7 @@ def render():
     with st.spinner(f"Running {episodes:,} episodes of SARSA…"):
         history, stats = _train(*keys, env["slip"], env["goal_reward"], gamma,
                                 alpha, episodes, max_steps, eps_kind, eps_params, 0)
-        V_star, pi_star = _dp_optimal(*keys, env["slip"], env["goal_reward"], gamma)
+        V_star, _ = _dp_optimal(*keys, env["slip"], env["goal_reward"], gamma)
 
     if not history:
         st.warning("No episodes were run.")
@@ -562,20 +546,25 @@ def render():
     st.markdown("#### Training results")
 
     last = slice(-100, None)
+    n_ep = len(returns)
+    n_fell = int(falls.sum())
+    n_goal = int(success.sum())
+    n_timeout = n_ep - n_goal - n_fell
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total falls", f"{int(falls.sum()):,}",
-              help="Every time the agent fell into the abyss during training. It "
-              "levels off but never stops: ε keeps making random moves and slip "
-              "keeps pushing — measured at 10-16 falls per 100 episodes even "
-              "after the ledge is learned.")
-    m2.metric("Success rate (last 100)", f"{success[last].mean():.0%}",
+    m1.metric("🕳️ Falls (training)", f"{n_fell:,}",
+              help="Training episodes that ended with the agent falling into the "
+              "abyss. It levels off but never stops: ε keeps making random moves "
+              "and slip keeps pushing the agent over the edge.")
+    m2.metric("⏱️ Timeouts (training)", f"{n_timeout:,}",
+              help="Training episodes that ran out of steps without reaching the "
+              "exit or falling in — the agent wandered and never finished.")
+    m3.metric("Success rate (last 100)", f"{success[last].mean():.0%}",
               help="Share of the final 100 training episodes that reached the "
               "exit. Measured while still exploring, so it sits below what "
               "▶️ Play (ε = 0) achieves.")
-    m3.metric("Mean return (last 100)", f"{returns[last].mean():+.1f}",
-              help="Average discounted return G over the final 100 training "
-              "episodes — the same quantity as V, so it is comparable to V*(S). "
-              "Depressed by the falls exploration keeps causing.")
+    st.caption(
+        f"Across all {n_ep:,} training episodes: 🏁 **{n_goal:,}** escaped · "
+        f"🕳️ **{n_fell:,}** fell into the abyss · ⏱️ **{n_timeout:,}** timed out.")
 
     # A run that never finds the exit is a real (if uncommon) SARSA outcome, not
     # a broken room — but "0%" alone just looks like a bug. Say what happened.
@@ -587,9 +576,9 @@ def render():
             "enough of those deaths before it ever stumbles on the exit, it "
             "learns that the whole bottom of the board is lethal — and the exit "
             "sits at the far end of that same bottom row. It then commits to "
-            "fleeing upward forever. Compare V*(S) in the benchmark row below: DP "
-            "knows a good route exists, because it has the model and never had to "
-            "survive learning it.\n\n"
+            "fleeing upward forever. The dashed line on the return curve marks "
+            "V*(S): DP knows a good route exists, because it has the model and "
+            "never had to survive learning it.\n\n"
             "Try **🎲 Regenerate** for another board, switch to **Constant ε**, or "
             "raise the episode count.")
 
@@ -626,11 +615,11 @@ def render():
                                      gamma, tuple(sorted(policy_s.items())))
     s0 = grid.start_state()
     v_gre_start, v_star_start = V_greedy[s0], V_star[s0]
-    v_td_start = V_s.get(s0, 0.0)
     m4.metric("V(S) of this policy", f"{v_gre_start:.1f}",
               help="What the viewed policy is really worth from the start, "
               "evaluated exactly against the model — not SARSA's own estimate of "
-              "itself. See the benchmark row for why those two differ.")
+              "itself, which is lower because it is the value of the ε-greedy agent "
+              "that keeps exploring, not of the greedy policy ▶️ Play runs.")
 
     res_board_col, res_ctrl_col = st.columns([3, 2])
     with res_board_col:
@@ -690,19 +679,18 @@ def render():
                 st.warning("⏱️ Timed out before reaching the exit.")
             e1, e2, e3 = st.columns(3)
             e1.metric("Return G", f"{score:+.1f}",
-                help="Discounted episode return G = Σ γ^t·r₍t+1₎. A fall already "
-                "paid the cliff penalty, so it is reported as-is; only a TIMEOUT "
-                f"takes the extra {TIMEOUT_PENALTY:+.0f} scoreboard penalty, so "
-                "that wandering forever still ranks last. One sample of a "
-                "stochastic rollout: play again and it will differ.")
+                help="On a WIN this is the real discounted return G = Σ γ^t·r₍t+1₎. "
+                f"On ANY loss — falling in or timing out — the scoreboard shows a "
+                f"flat {LOSS_SCORE:+.0f}, no matter when or how, mirroring the +100 "
+                "exit. One sample of a stochastic rollout: play again and it differs.")
             e2.metric("Steps", len(path) - 1,
                 help="Number of moves before the episode ended.")
             e3.metric("Result", "✅" if outcome == "goal" else "❌",
                 help="Whether the agent reached the exit.")
-            if outcome == "timeout":
+            if outcome != "goal":
                 st.caption(
-                    f"Includes the {TIMEOUT_PENALTY:+.0f} timeout penalty — the raw "
-                    f"discounted return was {G_ep:+.1f}.")
+                    f"Every loss scores a flat {LOSS_SCORE:+.0f}; the raw discounted "
+                    f"return this run was {G_ep:+.1f}.")
             if grid.shields:
                 st.caption(
                     "🛡️ Picked up the shield — no more slipping from there on."
@@ -725,73 +713,12 @@ def render():
         "ε > 0 the agent keeps taking random moves near a fatal edge, and on ice "
         "it keeps slipping. A conservative policy reduces falls; it cannot end "
         "them while it is still exploring.")
-    st.plotly_chart(_returns_curve(returns, v_star_start, view_ep),
+    st.plotly_chart(_returns_curve(returns, success, v_star_start, view_ep),
                     use_container_width=True)
+    st.caption(
+        "Every losing episode is scored -100 here, exactly as ▶️ Play scores it, so "
+        "wins and losses read the same in training as on the scoreboard. The average "
+        "climbs as SARSA escapes more often and settles below V* — the shortfall is "
+        "both its ε-caution and the losses it never fully stops making. (SARSA learns "
+        "from per-step rewards, not this number, so the flooring is display only.)")
     st.plotly_chart(_steps_curve(steps, success, view_ep), use_container_width=True)
-
-    # --- DP benchmark row --------------------------------------------------- #
-    st.divider()
-    st.markdown("#### 📐 Benchmark against the exact answer")
-    st.caption(
-        "Room 1's Dynamic Programming solves this exact board from the model. "
-        "SARSA never sees any of it — it only takes steps. With **Show policy "
-        "arrows** on, compare the two boards along the ledge: that is where "
-        "on-policy caution shows up as a different arrow.")
-
-    n1, n2, n3 = st.columns(3)
-    n1.metric("V_SARSA(S) — what SARSA believes", f"{v_td_start:.1f}",
-              help="max_a Q(S,a), SARSA's own estimate — the value of its "
-              "ε-greedy self, not of the greedy policy ▶️ Play runs.")
-    n2.metric("True V(S) of that policy", f"{v_gre_start:.1f}",
-              help="What the very same policy is actually worth, evaluated "
-              "exactly against the model.")
-    n3.metric("V*(S) — exact optimal", f"{v_star_start:.1f}",
-              help="The best any policy can do on this board — Room 1's answer.")
-
-    pct = (100 * v_gre_start / v_star_start) if v_star_start else 0.0
-    st.caption(
-        f"**The gap is the caution, not a bug.** SARSA's policy is worth "
-        f"{v_gre_start:.1f} against an optimal {v_star_start:.1f} — about "
-        f"{pct:.0f}%. Training longer will not close it: with a constant ε, SARSA "
-        f"converges to the best **ε-greedy** policy, and an ε-greedy agent next to "
-        f"an abyss really is worse off than a perfect one. Its own estimate "
-        f"({v_td_start:.1f}) is lower again, because that is the value of the "
-        f"exploring agent rather than of the greedy policy you watch."
-        + ("\n\n⚠️ **At this slip setting the optimal policy already avoids the "
-           "edge itself**, so some of SARSA's caution is the ice, not SARSA. Set "
-           "**slip = 0** to separate the two: there the optimal route hugs the "
-           "ledge, and every step away from it is SARSA's own choice."
-           if env["slip"] > 0 else
-           "\n\n✅ **slip = 0, so the physics is not doing the work**: the optimal "
-           "route hugs the ledge, and every step SARSA takes away from it is "
-           "caution it chose."))
-
-    # The shield's only interesting question, answered exactly for THIS board.
-    if grid.stateful:
-        gain = V_star[grid._state(START, 1)] - V_star[grid._state(START, 0)]
-        collects = _dp_collects_shield(grid, pi_star)
-        st.caption(
-            f"**🛡️ Is the shield worth it here?** Holding one from the start is "
-            f"worth **{gain:+.1f}** — but that is the value of *having* it, not of "
-            f"*fetching* it, and the walk costs discounting. On this board the "
-            + (f"optimal policy **does** detour to collect it."
-               if collects else
-               f"optimal policy **skips it** and takes the ice as it comes: the "
-               f"trip costs more than {gain:.1f}. Raising γ (detours get cheaper) "
-               f"or slip (immunity gets more valuable) can flip that.")
-            + " Note SARSA only learns the **🛡️ Collected** layer on cells it "
-              "actually reaches while holding one — arrows elsewhere on that layer "
-              "are unvisited noise, not opinions.")
-
-    b1, b2 = st.columns(2)
-    with b1:
-        st.plotly_chart(
-            _figure(grid, V, policy, show_arrows, height=420,
-                    title=f"V_SARSA — learned ({view_ep:,} episodes)"),
-            use_container_width=True, key="room3_bench_td")
-    with b2:
-        st.plotly_chart(
-            _figure(grid, _project(grid, V_star, layer),
-                    _project(grid, pi_star, layer), show_arrows, height=420,
-                    title="V* — computed exactly (DP)"),
-            use_container_width=True, key="room3_bench_dp")

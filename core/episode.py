@@ -5,41 +5,47 @@ Shared episode utilities for the discrete rooms (1-4).
 (so slips actually happen) and returns the visited path plus outcome — the data
 the ▶️ Play Episode animation replays cell-by-cell.
 
-`scored_return` turns that episode's return into the number shown on screen,
-adding a penalty when the agent never escaped. See its docstring for why the
+`scored_return` turns that episode's return into the number shown on screen: the
+real return on a win, a flat -100 for any loss. See its docstring for why the
 scoreboard and the maths deliberately use different numbers.
 """
 from __future__ import annotations
 
-# Penalty added to a timed-out episode's REPORTED return. Mirrors the
-# standardized +100 goal reward: escaping is +100, failing to escape is -100.
-TIMEOUT_PENALTY = -100.0
+# The flat score shown for ANY lost episode, mirroring the standardized +100 exit:
+# escaping is worth its real (positive) return, and every way of NOT escaping —
+# falling, being caught, or timing out — is worth exactly this, no matter when or
+# how it happened.
+LOSS_SCORE = -100.0
+# Back-compat alias: rooms import this name in their help text.
+TIMEOUT_PENALTY = LOSS_SCORE
 
 
-def scored_return(G: float, outcome: str, penalty: float = TIMEOUT_PENALTY):
-    """The episode's score for display: G, plus `penalty` if it TIMED OUT.
+def scored_return(G: float, outcome: str) -> float:
+    """The episode's score for display: the real discounted return G on a WIN, a
+    flat LOSS_SCORE on ANY loss.
 
-    Raw G ranks giving up ABOVE escaping the hard way. A run that wanders and
-    times out without touching a penalty cell scores G = 0, while a run that
-    escapes across two -20 cells scores about -25 — so the scoreboard rewards
-    quitting. Adding `penalty` on timeout restores the intended ordering: not
-    finishing is always the worst outcome. -100 sits below the worst successful
-    return the optimal policy produces (measured at about -47 on the harshest
-    settings), so a timeout genuinely ranks last.
+    Every non-goal outcome — "fell", "caught", or "timeout" — scores exactly
+    LOSS_SCORE, regardless of WHEN it ended (an early fall and a late one score the
+    same) and HOW (abyss, guard, or the clock running out). A win shows its true
+    discounted G, which is always well above LOSS_SCORE because the exit is the only
+    positive reward — so escaping always outranks every way of failing, and all
+    failures tie.
 
-    This keys on "timeout" specifically, NOT on "did not reach the goal". A
-    Room 3 "fell" episode already paid the environment's real cliff penalty, so
-    charging it the timeout penalty too would double-count (-200 for a -100
-    fall) and misreport a decisive death as a failure to decide. Rooms 1-2 are
-    unaffected: with no pits, "not the goal" and "timeout" are the same set.
+    Why REPLACE G rather than penalise it: raw G ranks giving up ABOVE escaping the
+    hard way (a wander-and-timeout scores ~0, an escape across cost cells scores
+    negative). An earlier version ADDED a penalty on timeout only, which left a fall
+    or a catch showing its raw *discounted* value (~-80 for an early fall, less for a
+    late one) — inconsistent across losses and across timing. Returning a flat
+    LOSS_SCORE for every loss makes the scoreboard read the way a player expects:
+    win = your score, loss = -100, full stop. It also cannot double-count the
+    environment's own -100 that a fall/catch already paid, because it adds nothing.
 
-    IMPORTANT: this deliberately breaks `G ≈ V(S)`. The scored return of a
-    timed-out episode is NOT its discounted return, and averaging scored returns
-    does NOT give the value function. This is a SCOREBOARD number, for the player
-    only. Everything doing maths — V, Q, MC's updates, the training curves, the
+    IMPORTANT: this deliberately breaks `G ≈ V(S)`. Averaging scored returns does
+    NOT give the value function. This is a SCOREBOARD number, for the player only.
+    Everything doing maths — V, Q, the learners' updates, the training curves, the
     DP benchmark — must use the raw G that `rollout` returns, never this.
     """
-    return G + penalty if outcome == "timeout" else G
+    return G if outcome == "goal" else LOSS_SCORE
 
 
 def rollout(grid, policy, gamma: float = 1.0, max_steps: int = 200,
@@ -63,9 +69,11 @@ def rollout(grid, policy, gamma: float = 1.0, max_steps: int = 200,
     G       : discounted return  G = Σ_t γ^t · r_{t+1}  (matches how V is defined).
     outcome : "goal"    — reached the exit,
               "fell"    — ended on a terminal hazard (Room 3's abyss),
+              "caught"  — caught by Room 4's patrol guard (also terminal),
               "timeout" — still wandering when the step cap ran out.
-              A fall is NOT a timeout: it ended the episode decisively and
-              already paid the pit's reward, so `scored_return` leaves it alone.
+              The three losses stay distinct because the KPIs count them
+              separately; the SCOREBOARD (`scored_return`) treats all three
+              alike, as a flat -100.
     landings (only if `with_landings`) : same length as `path`; `landings[k]`
              is the cell step k physically landed on. It differs from `path[k]`
              exactly when a teleport fired, which is the frame an animation must
@@ -73,7 +81,10 @@ def rollout(grid, policy, gamma: float = 1.0, max_steps: int = 200,
     """
     s = grid.reset()
     path = [s]
-    landings = [s]
+    # Only track landings when asked: it reads `grid.last_landing`, which only the
+    # teleport-capable IcyGridWorld exposes. A guard/coin grid has no transient
+    # landings, so requiring the attribute everywhere would be false coupling.
+    landings = [s] if with_landings else None
     G = 0.0
     discount = 1.0
 
@@ -88,15 +99,19 @@ def rollout(grid, policy, gamma: float = 1.0, max_steps: int = 200,
         G += discount * r
         discount *= gamma
         path.append(s)
-        landings.append(grid.last_landing)
+        if with_landings:
+            landings.append(grid.last_landing)
         if grid.is_terminal(s):
             break
 
-    # Compare the CELL, not the state: a shielded room's states are (i, j, k),
+    # Compare the CELL, not the state: an augmented room's states are (i, j, ...),
     # so `s == grid.goal` would never be true and every escape would be
-    # misreported as a timeout.
+    # misreported as a timeout. Check caught before fell: both are terminal, but
+    # they are different deaths and the KPIs count them separately (Room 4).
     if grid.cell_of(s) == grid.goal:
         outcome = "goal"
+    elif grid.is_caught(s):
+        outcome = "caught"
     elif grid.is_terminal(s):
         outcome = "fell"
     else:

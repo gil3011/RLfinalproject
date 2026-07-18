@@ -43,7 +43,13 @@ import numpy as np
 from algorithms.monte_carlo import CONSTANT, DECAYING, epsilon_at
 from core.icy_grid import ACTION_SPACE
 
-__all__ = ["sarsa_control", "CONSTANT", "DECAYING"]
+# Which bootstrap target the shared loop uses — the ONE line that separates the
+# two algorithms (see `_td_control`).
+SARSA = "sarsa"
+QLEARNING = "qlearning"
+
+__all__ = ["sarsa_control", "q_learning_control", "SARSA", "QLEARNING",
+           "CONSTANT", "DECAYING"]
 
 
 def _argmax_random(q: dict, rng) -> str:
@@ -75,8 +81,9 @@ def _snapshot(Q, rng):
     return V, policy
 
 
-def sarsa_control(
+def _td_control(
     grid,
+    kind: str,
     gamma: float = 0.95,
     alpha: float = 0.1,
     n_episodes: int = 2000,
@@ -86,14 +93,28 @@ def sarsa_control(
     seed: int = 0,
     n_checkpoints: int = 50,
 ):
-    """Run on-policy TD control (SARSA) on `grid`.
+    """Shared TD-control loop. `kind` selects the bootstrap target and NOTHING else.
+
+      SARSA     : target = Q[s2][a2] — the action actually taken next, so the
+                  risk of the agent's own future exploration is priced in.
+      QLEARNING : target = max_a Q[s2][a] — the greedy action, as if it would
+                  never explore again, so the ledge looks safe from a distance.
+
+    Both draw the NEXT action `a2` epsilon-greedily and take it (the behaviour
+    policy is identical); only what they bootstrap from differs. That is the
+    whole SARSA-vs-Q-learning lesson, and keeping it to one branch in one loop is
+    what guarantees the two are otherwise a controlled comparison — Room 3 was
+    burned by a harness that silently ran SARSA twice.
 
     Returns (Q, policy, history, stats):
       Q       : {state: {action: value}}
       policy  : greedy policy at the END of training
       history : ~`n_checkpoints` snapshots {V, policy, eps, episode}
-      stats   : per-episode arrays {returns, steps, success, falls, eps}
+      stats   : per-episode arrays {returns, steps, success, falls, caught, eps}.
+                `caught` is always all-False on a grid with no guard (Room 3);
+                Room 4 reads it as its headline death count.
     """
+    assert kind in (SARSA, QLEARNING), f"unknown TD kind: {kind!r}"
     rng = np.random.default_rng(seed)
     # Observing a run must not change it — see _snapshot.
     snap_rng = np.random.default_rng(seed + 10_000)
@@ -103,6 +124,7 @@ def sarsa_control(
     steps = np.zeros(n_episodes, dtype=int)
     success = np.zeros(n_episodes, dtype=bool)
     falls = np.zeros(n_episodes, dtype=bool)
+    caught = np.zeros(n_episodes, dtype=bool)
     eps_log = np.zeros(n_episodes)
 
     # Evenly spaced checkpoints, always including the final episode.
@@ -130,15 +152,17 @@ def sarsa_control(
                 # Terminal: the return is just r — there is no next action to
                 # bootstrap from, and Q has no row for a terminal state.
                 Q[s][a] += alpha * (r - Q[s][a])
-                # Compare the CELL, not the state: in a shielded room a state is
-                # (i, j, k), so `s2 == grid.goal` is never true and every escape
-                # would be recorded as a failure.
+                # Compare the CELL, not the state: in an augmented room a state
+                # is (i, j, ...), so `s2 == grid.goal` is never true and every
+                # escape would be recorded as a failure.
                 success[k] = grid.cell_of(s2) == grid.goal
                 falls[k] = grid.is_pit(s2)
+                caught[k] = grid.is_caught(s2)
                 break
 
             a2 = _epsilon_greedy(Q, s2, eps, rng)
-            Q[s][a] += alpha * (r + gamma * Q[s2][a2] - Q[s][a])
+            target = Q[s2][a2] if kind == SARSA else max(Q[s2].values())
+            Q[s][a] += alpha * (r + gamma * target - Q[s][a])
             s, a = s2, a2
 
         returns[k] = G
@@ -150,5 +174,22 @@ def sarsa_control(
 
     _, final_policy = _snapshot(Q, snap_rng)
     stats = {"returns": returns, "steps": steps, "success": success,
-             "falls": falls, "eps": eps_log}
+             "falls": falls, "caught": caught, "eps": eps_log}
     return Q, final_policy, history, stats
+
+
+def sarsa_control(grid, **kwargs):
+    """On-policy TD control (SARSA). Bootstraps off the action actually taken next."""
+    return _td_control(grid, SARSA, **kwargs)
+
+
+def q_learning_control(grid, **kwargs):
+    """Off-policy TD control (Q-learning). Bootstraps off the greedy action.
+
+    Adapted from `code examples/q_learning.py`. Identical to SARSA except the
+    target is `max_a Q[s2][a]` instead of `Q[s2][a2]` — so it evaluates the
+    optimal policy while behaving epsilon-greedily. On Room 4's board it learns
+    to walk the ledge for the coin; the DP benchmark shows, per board, whether
+    that was brave or merely over-optimistic.
+    """
+    return _td_control(grid, QLEARNING, **kwargs)
