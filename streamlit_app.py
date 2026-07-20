@@ -8,7 +8,7 @@ built and enabled one at a time.
 import streamlit as st
 
 from core.layout import ROOMS, configure_page, room_selector
-from rooms import room1_dp, room2_mc, room3_sarsa, room4_qlearning
+from rooms import room1_dp, room2_mc, room3_sarsa, room4_qlearning, room5_dqn
 
 configure_page()
 room = room_selector()
@@ -21,5 +21,7 @@ elif room == 3:
     room3_sarsa.render()
 elif room == 4:
     room4_qlearning.render()
+elif room == 5:
+    room5_dqn.render()
 else:
     st.info(f"🚧 {ROOMS[room]} is not built yet — coming soon.")
