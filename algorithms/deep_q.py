@@ -240,38 +240,41 @@ def load_net(net_state, hidden, obs_dim=4, n_actions=9):
     return net
 
 
-def q_field(net, enemy_xy, arena=10.0, res=50):
-    """max_a Q(x, y, ·) sampled on a `res×res` grid, holding the enemy fixed at
-    `enemy_xy`. Returns (xs, ys, Z) with Z[j, i] the value at (xs[i], ys[j]) — a
-    2-D SLICE of the 4-D value function (the field really depends on the enemy)."""
+def q_field(net, enemies, arena=10.0, res=50):
+    """max_a Q(x, y, ·) sampled on a `res×res` grid, holding the enemies fixed at
+    `enemies` (shape (n, 2)). Returns (xs, ys, Z) with Z[j, i] the value at
+    (xs[i], ys[j]) — a 2-D SLICE of the (2+2n)-D value function (the field really
+    depends on where the enemies are)."""
+    enemies = np.atleast_2d(np.asarray(enemies, dtype=np.float64))
+    n = len(enemies)
     xs = np.linspace(0.0, arena, res)
     ys = np.linspace(0.0, arena, res)
-    ex, ey = float(enemy_xy[0]), float(enemy_xy[1])
-    obs = np.zeros((res * res, 4), dtype=np.float32)
     gx, gy = np.meshgrid(xs, ys)
     flatx, flaty = gx.ravel(), gy.ravel()
+    obs = np.zeros((res * res, 2 + 2 * n), dtype=np.float32)
     obs[:, 0] = flatx / arena
     obs[:, 1] = flaty / arena
-    obs[:, 2] = (ex - flatx) / arena
-    obs[:, 3] = (ey - flaty) / arena
+    for j, (ex, ey) in enumerate(enemies):
+        obs[:, 2 + 2 * j] = (ex - flatx) / arena
+        obs[:, 3 + 2 * j] = (ey - flaty) / arena
     with torch.no_grad():
         q = net(torch.tensor(obs)).max(1).values.numpy()
     return xs, ys, q.reshape(res, res)
 
 
 def greedy_rollout(net, env, seed=None, options=None):
-    """One greedy (ε=0) episode. Returns frames of agent/enemy positions, the
+    """One greedy (ε=0) episode. Returns frames of agent/enemies positions, the
     outcome, the raw undiscounted return, and the step count. Ephemeral — the
     caller renders it and lets it go (never store in session state)."""
     obs, info = env.reset(seed=seed, options=options)
-    frames = [{"agent": info["agent"].copy(), "enemy": info["enemy"].copy()}]
+    frames = [{"agent": info["agent"].copy(), "enemies": info["enemies"].copy()}]
     G, t, outcome = 0.0, 0, "timeout"
     while True:
         a = _greedy_action(net, obs)
         obs, r, term, trunc, info = env.step(a)
         G += r
         t += 1
-        frames.append({"agent": info["agent"].copy(), "enemy": info["enemy"].copy()})
+        frames.append({"agent": info["agent"].copy(), "enemies": info["enemies"].copy()})
         if term or trunc:
             outcome = info.get("outcome") or ("timeout" if trunc else "caught")
             break

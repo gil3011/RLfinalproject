@@ -498,7 +498,7 @@ shield machinery would tangle the shared class. Instead:
 > and Room 5 is the stated exception. Momentum is the single physics knob to re-add if the
 > theme is ever wanted back — the enemy and reward machinery are independent of it.
 
-* **State & Action Space:** Continuous state `[x, y, eₓ−x, e_y−y]` — the agent's position plus the **enemy's position relative to the agent** → `obs_dim = 4`. No velocity components: movement is inertia-free, so the action *is* the displacement and there is no momentum to carry in the state. **9 discrete actions** assign a displacement $(dx, dy) \in \{-1,0,1\}$, **normalised so every non-zero move travels exactly 1 m** (diagonals therefore ≈0.707 m per axis — flat *speed*, not flat components). **One decision = one metre**; a corner-to-corner run is ~14 steps.
+* **State & Action Space:** Continuous state `[x, y]` + per enemy `[eₓ−x, e_y−y]` — the agent's position plus each **enemy's position relative to the agent** → `obs_dim = 2 + 2·n_enemies` (**4** with one enemy, **6** with two). No velocity components: movement is inertia-free, so the action *is* the displacement and there is no momentum to carry in the state. **9 discrete actions** assign a displacement $(dx, dy) \in \{-1,0,1\}$, **normalised so every non-zero move travels exactly 1 m** (diagonals therefore ≈0.707 m per axis — flat *speed*, not flat components). **One decision = one metre**; a corner-to-corner run is ~14 steps.
 
 * **The enemy is the whole room.** One marker **spawns at a random position each episode** (central region, kept ≥3 m clear of the agent's corner so it is never an instant catch) and, each step, moves a fixed fraction of the agent's speed **straight toward the agent's current position** (greedy pursuit). The agent cannot simply beeline: half the time the enemy sits across the direct line, so the agent must **arc around** it — exactly the behaviour the relative-enemy input exists to let the network learn. The enemy being **slower than the agent** is what keeps the room winnable: once the agent gets the enemy behind it, a slower pursuer can no longer close before the exit.
 
@@ -539,11 +539,39 @@ shield machinery would tangle the shared class. Instead:
   The four cardinal moves travel 1 m along one axis; the four diagonals travel 1 m total (≈0.707 m per axis); action 4 holds position (0 m) — mostly useless against a pursuer, but kept so the action space matches Room 6. There are **no walls**; only the arena boundary clamps a move. (The moves are a displacement, not a velocity — with no momentum the two coincide; the $(V_x,V_y)$ labels above read as "metres this step".)
 * **Rewards (drive the curves below):** exit **+100**, caught **−100**, plus a potential-based shaping term toward the exit. With no walls the path to the exit is a straight line, so the shaping potential is just the **Euclidean** distance to the exit — the through-the-walls geodesic machinery the old spec needed is gone. Goal reward is fixed at +100 (no slider).
 
+> **✅ A timeout penalty in the LEARNING signal was requested, measured, and REJECTED —
+> Room 3's lesson reproduced here (2026-07-20, user: "make timeout −100, force the agent to
+> exit").** There is nothing to force: at the defaults the trained agent **already times out
+> 0%** of the time (escape 93%, caught 6%). Adding −100 on timeout *to the learner* made it
+> **worse** — timeouts rose 0%→5% and escape fell 93%→90%, exactly the non-Markov poison
+> §2 documents (elapsed time `t` is not in the 4-D state, so the penalty lands on whatever
+> *position* the clock stopped in). A **step cost** — the Markov alternative — was worse
+> still: it makes the agent rush the exit and run into the enemy (caught 6%→13–34%, escape
+> down to 56–73%). So the −100 for a loss stays **on the scoreboard only** (`LOSS_SCORE`,
+> shown on a timed-out ▶️ Play, mirroring the +100 exit and Rooms 2–4); the learner never
+> sees it. Same conclusion as Rooms 1 and 3: punish dithering, if at all, never through a
+> timeout the state cannot see.
+
 **On-page controls (every widget carries a `help=` tooltip):**
 
 * **🎮 Environment** (Row-1 board panel):
   * **Enemy speed (× yours)** — slider `0.50`–`0.95`, default **`0.75`** (MEASURED — peak naive-vs-skilled gap; see the band above). Capped below 1.0 because at equal speed even a good policy escapes only ~58%. Renamed from "Patrol speed" because the enemy now chases rather than sweeps. (No 🎲 Regenerate — geometry is fixed, as in Rooms 3–4. No goal-reward slider.)
   * **Max steps per episode** — select `{40, 60, 80, 120}`, default **`60`**.
+  * **Number of enemies** — 1 or 2 (default **1**), added 2026-07-20 (user). A second
+    chaser adds two inputs to the network (its relative position → `obs_dim` 6) and is
+    much harder to shake — this is Room 5's cheap echo of Room 4's "each coin doubles the
+    tabular table" pain: here another enemy is **two more floats**, not a state explosion.
+  * **Randomize start each episode** — checkbox (default **off**), added 2026-07-20 (user).
+    Off: always the bottom-left corner. On: a fresh random start every episode, so the net
+    must learn to escape from *anywhere*, not just the corner — a harder generalisation test.
+
+> **✅ All four combinations are learnable — MEASURED (speed 0.75, 800 ep, 2 seeds).** Escape
+> rate: **1 enemy fixed 89%, 2 enemies fixed 86%, 1 enemy random-start 67%, 2 enemies
+> random-start 78%.** Two enemies barely dents it (86 vs 89) — the extra relative-position
+> floats don't overwhelm the small net, which is the room's point. **Random start is the real
+> difficulty** (67–78%, more variance across seeds) — escaping from an arbitrary spawn is a
+> genuine generalisation test, not a broken room. None is impossible; the harder ones just
+> reward more training.
 * **🧠 Deep Q-Network** (Row-2 algorithm section), laid out in four columns + an ε row. ⚠️ **These defaults were tuned for the old spec (16-dim obs, walls, three guards) — re-check them on the simpler MDP.** `obs_dim` drops 16→4 and the reward landscape is smoother, so the network may converge in **fewer** episodes; the geodesic wall-cell shaping bug that dominated the old build's fate no longer exists (no walls), but the learning rate is still the first thing to sweep.
   * **Training episodes** — slider `100`–`1500`, default **`500`**.
   * **Discount γ** — slider `0.80`–`0.999`, default **`0.99`**.

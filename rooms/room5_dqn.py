@@ -24,6 +24,7 @@ from core.chase_arena import (
 )
 from algorithms.deep_q import dqn_control, load_net, q_field, greedy_rollout
 from algorithms.monte_carlo import CONSTANT, DECAYING, epsilon_at, moving_average
+from core.episode import LOSS_SCORE
 
 LEGEND = ("🤖 start (bottom-left) · 🏁 exit (top-right) · 🔴 enemy (fatal on "
           "contact) · value field: **blue = high**, red = low (RdBu, 0-centred)")
@@ -33,11 +34,17 @@ _EVAL_SEED = 4242            # fixed spawn for the scrubber/results, so it is st
 
 
 # ───────────────────────── board figure ─────────────────────────
-def _arena_figure(enemy, agent=None, field=None, path=None, dead=False,
-                  key_note=None):
-    """Plotly figure of the arena. `enemy` is (x, y) or a list of them; `field`
-    is an optional (xs, ys, Z) value slice drawn as an RdBu heatmap underneath."""
+def _arena_figure(enemies, agent=None, field=None, path=None, dead=False):
+    """Plotly figure of the arena. `enemies` is a single (x, y) or an (n, 2) array;
+    `field` is an optional (xs, ys, Z) value slice drawn as an RdBu heatmap
+    underneath."""
     fig = go.Figure()
+
+    if enemies is None:
+        enemies = []
+    else:
+        arr = np.asarray(enemies, dtype=float)
+        enemies = [arr] if arr.ndim == 1 else list(arr)
 
     if field is not None:
         xs, ys, Z = field
@@ -52,7 +59,6 @@ def _arena_figure(enemy, agent=None, field=None, path=None, dead=False,
                   x1=EXIT[0]+GOAL_RADIUS, y1=EXIT[1]+GOAL_RADIUS,
                   fillcolor="rgba(38,166,91,0.55)", line=dict(color="white", width=2),
                   layer="above")
-    enemies = [enemy] if (enemy is not None and np.ndim(enemy) == 1) else (enemy or [])
     for e in enemies:
         fig.add_shape(type="circle", x0=e[0]-CATCH_RADIUS, y0=e[1]-CATCH_RADIUS,
                       x1=e[0]+CATCH_RADIUS, y1=e[1]+CATCH_RADIUS,
@@ -96,15 +102,24 @@ def _arena_figure(enemy, agent=None, field=None, path=None, dead=False,
 # ───────────────────────── controls ─────────────────────────
 def _env_controls():
     st.markdown("##### 🎮 Environment")
+    n_enemies = st.radio("Number of enemies", [1, 2], index=0, horizontal=True,
+        help="How many enemies chase you. Each adds two inputs to the network "
+        "(its position relative to you), so 2 enemies → obs_dim 6. Two hunters are "
+        "much harder to shake.")
     speed = st.slider("Enemy speed (× yours)", 0.50, 0.95, 0.75, 0.05,
-        help="How fast the enemy chases, as a fraction of your speed. Measured "
-        "sweet spot: at 0.75 a good policy escapes ~95% while ignoring the enemy "
-        "escapes only ~51%. Capped below 1.0 — at equal speed even good play "
-        "escapes ~58%.")
+        help="How fast each enemy chases, as a fraction of your speed. Measured "
+        "sweet spot (one enemy): at 0.75 a good policy escapes ~95% while ignoring "
+        "the enemy escapes only ~51%. Capped below 1.0 — at equal speed even good "
+        "play escapes ~58%.")
     max_steps = st.select_slider("Max steps per episode", [40, 60, 80, 120], 60,
         help="Metres of travel before an episode times out (one decision = 1 m). "
         "A corner-to-corner run is ~14 steps.")
-    return dict(enemy_speed=speed, max_steps=max_steps)
+    random_start = st.checkbox("Randomize start each episode", value=False,
+        help="Off: you always start in the bottom-left corner. On: you start at a "
+        "random spot every episode, so the network must learn to escape from "
+        "anywhere — a harder generalisation test.")
+    return dict(enemy_speed=speed, max_steps=max_steps, n_enemies=n_enemies,
+                random_start=random_start)
 
 
 def _algo_row():
@@ -171,7 +186,7 @@ def render():
         st.markdown(
             "The arena is **continuous**, so there is no table of states to fill in — "
             "a **neural network** approximates the value of *every* point, including "
-            "the ones between where it has been. The enemy **chases** you with pure "
+            "the ones between where it has been. Each enemy **chases** you with pure "
             "pursuit (it always heads at where you are *now*), so it can be **baited**: "
             "arc around it, get it behind you, and — being slower — it can no longer "
             "catch you before the exit.\n\n"
@@ -179,19 +194,23 @@ def render():
             "learned landscape (blue = high value). Drag the **episode scrubber** to "
             "watch the policy improve, and **▶️ Play** to run a fresh chase. Ignoring "
             "the enemy and beelining escapes only ~half the time; a policy that reads "
-            "the enemy escapes ~95%.")
+            "the enemy escapes ~95%. Add a **second enemy** (each one adds two inputs to "
+            "the net), or **randomize your start** to make it escape from anywhere.")
 
     # ── Row 1 — setup board + environment controls ──
     board_col, env_col = st.columns([3, 2])
     with env_col:
         env = _env_controls()
+    env_kwargs = dict(enemy_speed=env["enemy_speed"], max_steps=env["max_steps"],
+                      n_enemies=env["n_enemies"], random_start=env["random_start"])
+    obs_dim = 2 + 2 * env["n_enemies"]
     with board_col:
         board = st.empty()
         st.caption(LEGEND)
-        # preview: a representative enemy spawn (fixed, no training yet)
-        prev_env = ChaseArena(enemy_speed=env["enemy_speed"], max_steps=env["max_steps"])
+        # preview: a representative spawn (fixed, no training yet)
+        prev_env = ChaseArena(**env_kwargs)
         _, prev_info = prev_env.reset(seed=_EVAL_SEED)
-        board.plotly_chart(_arena_figure(prev_info["enemy"], agent=START),
+        board.plotly_chart(_arena_figure(prev_info["enemies"], agent=prev_info["agent"]),
                            use_container_width=True, key="room5_preview")
 
     # ── Row 2 — algorithm ──
@@ -199,9 +218,10 @@ def render():
     algo, train = _algo_row()
 
     # ── Train gate ──
-    sig = (env["enemy_speed"], env["max_steps"], algo["n_episodes"], algo["gamma"],
-           algo["lr"], algo["batch"], algo["train_freq"], algo["target_update"],
-           algo["buffer"], algo["eps_kind"], algo["eps_params"])
+    sig = (env["enemy_speed"], env["max_steps"], env["n_enemies"], env["random_start"],
+           algo["n_episodes"], algo["gamma"], algo["lr"], algo["batch"],
+           algo["train_freq"], algo["target_update"], algo["buffer"],
+           algo["eps_kind"], algo["eps_params"])
     if train:
         prog = st.progress(0.0, text="Training the deep Q-network…")
 
@@ -210,13 +230,14 @@ def render():
                 prog.progress(done / total, text=f"Training… episode {done:,}/{total:,}")
 
         bundle = dqn_control(
-            lambda: ChaseArena(enemy_speed=env["enemy_speed"],
-                               max_steps=env["max_steps"], shaping_coef=5.0),
+            lambda: ChaseArena(shaping_coef=5.0, **env_kwargs),
+            obs_dim=obs_dim,
             n_episodes=algo["n_episodes"], gamma=algo["gamma"], lr=algo["lr"],
             batch_size=algo["batch"], buffer_size=algo["buffer"],
             target_update=algo["target_update"], train_freq=algo["train_freq"],
             eps_kind=algo["eps_kind"], eps_params=algo["eps_params"],
-            reward_scale=0.01, double=True, seed=np.random.randint(1_000_000))
+            reward_scale=0.01, double=True, seed=np.random.randint(1_000_000),
+            progress_cb=_cb)
         prog.empty()
         st.session_state["room5_bundle"] = bundle
         st.session_state["room5_trained_sig"] = sig
@@ -255,16 +276,16 @@ def render():
         help="Replay the greedy policy — and its value field — as they stood at "
         "this point in training. Slide left to watch it learn.")
     show_field = vc2.checkbox("Show the network's value field", value=True,
-        help="Sample max_a Q over a 50×50 grid, holding the enemy at its shown "
-        "position. It is a 2-D slice of the 4-D value function.")
+        help="Sample max_a Q over a 50×50 grid, holding the enemies at their shown "
+        "positions. It is a 2-D slice of the full value function.")
     cp = cps[cp_i - 1]
-    net = load_net(cp["net_state"], bundle["hidden"])
+    net = load_net(cp["net_state"], bundle["hidden"], obs_dim=obs_dim)
 
     # a stable greedy rollout at this checkpoint (fixed spawn, so scrubbing is steady)
-    view_env = ChaseArena(enemy_speed=env["enemy_speed"], max_steps=env["max_steps"])
+    view_env = ChaseArena(**env_kwargs)
     roll = greedy_rollout(net, view_env, seed=_EVAL_SEED)
-    spawn_enemy = roll["frames"][0]["enemy"]
-    field = q_field(net, spawn_enemy) if show_field else None
+    spawn = roll["frames"][0]
+    field = q_field(net, spawn["enemies"]) if show_field else None
 
     res_board_col, res_ctrl_col = st.columns([3, 2])
     with res_board_col:
@@ -282,39 +303,49 @@ def render():
     results_caption.caption(
         f"Greedy policy after **{cp['episode']:,}** episodes "
         f"(checkpoint {cp_i} of {len(cps)}). "
-        + ("Value field sliced at the shown enemy position." if show_field else ""))
+        + ("Value field sliced at the shown enemy position(s)." if show_field else ""))
 
     # Play is EPHEMERAL — nothing to session state (UI_STRUCTURE).
     if play:
-        play_env = ChaseArena(enemy_speed=env["enemy_speed"], max_steps=env["max_steps"])
+        play_env = ChaseArena(**env_kwargs)
         pr = greedy_rollout(net, play_env)          # unseeded → new spawn each press
         frames = pr["frames"]
         for k in range(len(frames)):
             dead_here = k == len(frames) - 1 and pr["outcome"] == "caught"
             trail = [(f["agent"][0], f["agent"][1]) for f in frames[: k + 1]]
             results_board.plotly_chart(
-                _arena_figure(frames[k]["enemy"], agent=frames[k]["agent"],
+                _arena_figure(frames[k]["enemies"], agent=frames[k]["agent"],
                               path=trail, dead=dead_here),
                 use_container_width=True, key=f"room5_play_{k}")
             time.sleep(_STEP_DELAY[speed_sel])
+        # Scoreboard: a WIN shows its real return; ANY loss (caught or timed out)
+        # shows a flat −100, mirroring the +100 exit (Rooms 2–4 convention). This is
+        # the displayed number only — the learner never sees it (measured: a timeout
+        # penalty in the learning signal makes Room 5 time out MORE, not less).
+        won = pr["outcome"] == "escaped"
+        score = pr["return"] if won else LOSS_SCORE
         with episode_slot:
-            if pr["outcome"] == "escaped":
+            if won:
                 st.success("🏁 Escaped! Reached the exit.")
             elif pr["outcome"] == "caught":
-                st.error("🔴 Caught by the enemy — the run ends here.")
+                st.error("🔴 Caught by an enemy — the run ends here.")
             else:
                 st.warning("⏱️ Timed out before reaching the exit.")
             e1, e2, e3 = st.columns(3)
-            e1.metric("Return", f"{pr['return']:+.1f}",
-                help="Undiscounted return of this run (+100 exit / −100 caught, plus "
-                "the shaping toward the exit). One stochastic sample.")
+            e1.metric("Return", f"{score:+.1f}",
+                help="On a WIN, the real undiscounted return (+100 exit plus shaping). "
+                f"On ANY loss — caught or timed out — a flat {LOSS_SCORE:+.0f}, mirroring "
+                "the +100 exit. One stochastic sample.")
             e2.metric("Steps", pr["steps"], help="Metres travelled before the run ended.")
-            e3.metric("Result", "✅" if pr["outcome"] == "escaped" else "❌",
+            e3.metric("Result", "✅" if won else "❌",
                 help="Whether the agent reached the exit.")
+            if not won:
+                st.caption(f"Every loss scores a flat {LOSS_SCORE:+.0f}; the raw return "
+                           f"this run was {pr['return']:+.1f}.")
     else:
         trail = [(f["agent"][0], f["agent"][1]) for f in roll["frames"]]
         results_board.plotly_chart(
-            _arena_figure(spawn_enemy, agent=START, field=field, path=trail),
+            _arena_figure(spawn["enemies"], agent=spawn["agent"], field=field, path=trail),
             use_container_width=True, key="room5_results")
 
     # ── Graphs ──
