@@ -298,8 +298,9 @@ def render():
         speed_sel = st.select_slider("Animation speed", ["Slow", "Normal", "Fast"],
             "Normal", help="Playback speed of the animated episode.")
         play = st.button("▶️ Play Episode", type="primary", use_container_width=True,
-            help="Run the viewed policy with exploration off across a fresh chase — "
-            "the enemy spawns somewhere new each time.")
+            help="Run the viewed policy with exploration off across a fresh chase — the "
+            "enemies spawn somewhere new every press, even if training used the fixed "
+            "layout, so each play is a new test of what it learned.")
         episode_slot = st.container()
 
     results_caption.caption(
@@ -309,7 +310,9 @@ def render():
 
     # Play is EPHEMERAL — nothing to session state (UI_STRUCTURE).
     if play:
-        play_env = ChaseArena(**env_kwargs)
+        # Play ALWAYS throws a fresh random enemy layout at the learned policy, even
+        # when training used the fixed spawn — so every press is a new chase to watch.
+        play_env = ChaseArena(**{**env_kwargs, "random_enemies": True})
         pr = greedy_rollout(net, play_env)          # unseeded → new spawn each press
         frames = pr["frames"]
         for k in range(len(frames)):
