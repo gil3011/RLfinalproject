@@ -561,17 +561,22 @@ shield machinery would tangle the shared class. Instead:
     chaser adds two inputs to the network (its relative position → `obs_dim` 6) and is
     much harder to shake — this is Room 5's cheap echo of Room 4's "each coin doubles the
     tabular table" pain: here another enemy is **two more floats**, not a state explosion.
-  * **Randomize start each episode** — checkbox (default **off**), added 2026-07-20 (user).
-    Off: always the bottom-left corner. On: a fresh random start every episode, so the net
-    must learn to escape from *anywhere*, not just the corner — a harder generalisation test.
+  * **Randomize enemy positions each episode** — checkbox (default **on**), added 2026-07-20
+    (user; revised same day from an agent-start toggle to an *enemy* toggle — "agent starts at
+    the same point but the enemies at random locations when checked"). The **agent always
+    starts at the corner** (the fixed lesson). **On:** enemies spawn randomly each episode —
+    what forces the net to read the relative-enemy inputs and generalise, and what makes
+    escape-rate a smooth number. **Off:** enemies sit at fixed spawns (`FIXED_ENEMY_SPAWNS`)
+    and, with the agent fixed too, the episode is **deterministic** — a warm-up where the net
+    only has to solve one layout.
 
-> **✅ All four combinations are learnable — MEASURED (speed 0.75, 800 ep, 2 seeds).** Escape
-> rate: **1 enemy fixed 89%, 2 enemies fixed 86%, 1 enemy random-start 67%, 2 enemies
-> random-start 78%.** Two enemies barely dents it (86 vs 89) — the extra relative-position
-> floats don't overwhelm the small net, which is the room's point. **Random start is the real
-> difficulty** (67–78%, more variance across seeds) — escaping from an arbitrary spawn is a
-> genuine generalisation test, not a broken room. None is impossible; the harder ones just
-> reward more training.
+> **✅ MEASURED (speed 0.75, 800 ep).** Random enemies (the default): **1 enemy 89%, 2 enemies
+> 86%** escape — two enemies barely dents it, because the extra threat is only two more input
+> floats, not a state explosion (the room's point, and the deliberate contrast with Room 4's
+> "a second coin doubles the table"). Fixed enemies (deterministic warm-up): **winnable** —
+> the 1-enemy layout escapes in 18 steps, and the flanking 2-enemy layout `[(3.5,6.5),
+> (6.5,3.5)]` is solved by the DQN at 800 episodes (17 steps) even though the scripted evader
+> is caught by that pincer. None of the four combinations is impossible.
 * **🧠 Deep Q-Network** (Row-2 algorithm section), laid out in four columns + an ε row. ⚠️ **These defaults were tuned for the old spec (16-dim obs, walls, three guards) — re-check them on the simpler MDP.** `obs_dim` drops 16→4 and the reward landscape is smoother, so the network may converge in **fewer** episodes; the geodesic wall-cell shaping bug that dominated the old build's fate no longer exists (no walls), but the learning rate is still the first thing to sweep.
   * **Training episodes** — slider `100`–`1500`, default **`500`**.
   * **Discount γ** — slider `0.80`–`0.999`, default **`0.99`**.

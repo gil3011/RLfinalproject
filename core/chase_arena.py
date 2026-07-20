@@ -23,16 +23,20 @@ DESIGN (redesigned 2026-07-20, user) — see Plan.md §Room 5:
     you are, not where you'll be) so it can be baited — an agent that arcs around
     it gets it behind and, being slower, it can no longer close before the exit.
 
-WHY THINGS SPAWN RANDOMLY.
---------------------------
-With everything fixed the env is deterministic, so a policy escapes 0% or 100% —
-no band to measure and nothing to generalise. The enemies therefore spawn at
-random positions each `reset()` (kept clear of the agent so it is never an instant
-catch). Optionally the AGENT's own start is randomised too (`random_start`), which
-makes the room ask the network to escape from anywhere, not just the corner. Over
-many placements a naive beeline escapes some and dies to others, while a good
-evasive policy escapes more — that GAP is the learnable signal, and it is why the
-relative-enemy inputs have to be in the observation.
+THE AGENT ALWAYS STARTS AT THE CORNER; THE ENEMIES ARE WHAT VARY.
+-----------------------------------------------------------------
+The corner-to-corner run is the fixed lesson, so the agent always starts at
+`START` (bottom-left). What varies is the ENEMIES: with `random_enemies=True`
+(the default) they spawn at fresh random positions each `reset()`, kept clear of
+the agent so it is never an instant catch. That randomisation is what makes
+"escape rate" a smooth, measurable number AND what forces the network to actually
+read the relative-enemy inputs rather than memorise one path — over many
+placements a naive beeline escapes some and dies to others, while a good evasive
+policy escapes more, and that GAP is the learnable signal.
+
+With `random_enemies=False` the enemies sit at fixed spawns and, since the agent
+is fixed too, the whole episode is deterministic — a warm-up / demo mode where the
+network only has to solve one configuration.
 """
 from __future__ import annotations
 
@@ -51,10 +55,16 @@ STEP = 1.0                                           # agent moves 1 m per decis
 
 # Spawn regions and clear-zones so a fresh episode is never an instant death.
 SPAWN_LO, SPAWN_HI = 1.5, 8.5                        # enemy spawn box
-AGENT_MARGIN = 0.5                                   # random agent stays off the walls
 MIN_DIST_AGENT_ENEMY = 3.0                           # enemy never spawns on top of the agent
 MIN_DIST_ENEMIES = 2.0                               # two enemies start apart
-MIN_DIST_START_EXIT = 3.0                            # random agent never spawns on the exit
+
+# Fixed enemy spawns used when randomisation is OFF. The agent is always at START,
+# so the episode is then deterministic — a warm-up mode. Positions are clear of the
+# corner, the exit, and each other, and sit across the direct diagonal.
+FIXED_ENEMY_SPAWNS = {
+    1: np.array([[5.0, 5.0]], dtype=np.float64),
+    2: np.array([[3.5, 6.5], [6.5, 3.5]], dtype=np.float64),
+}
 
 # The 9 moves, indexed exactly as Plan.md §Room 5's table: dx = a//3 − 1,
 # dy = a%3 − 1. Non-zero moves are normalised to a 1 m step below.
@@ -89,7 +99,7 @@ class ChaseArena(gym.Env):
         enemy_speed: float = 0.70,      # fraction of the agent's 1 m/step (< 1 to be winnable)
         max_steps: int = 60,
         n_enemies: int = 1,             # 1 or 2 chasers
-        random_start: bool = False,     # randomise the agent's start each episode
+        random_enemies: bool = True,    # random enemy spawn each episode (off ⇒ fixed spawn)
         shaping_coef: float = 1.0,      # dense progress-toward-exit reward per metre gained
         goal_reward: float = 100.0,
         catch_penalty: float = 100.0,
@@ -98,7 +108,7 @@ class ChaseArena(gym.Env):
         self.enemy_speed = float(enemy_speed)
         self.max_steps = int(max_steps)
         self.n_enemies = int(n_enemies)
-        self.random_start = bool(random_start)
+        self.random_enemies = bool(random_enemies)
         self.shaping_coef = float(shaping_coef)
         self.goal_reward = float(goal_reward)
         self.catch_penalty = float(catch_penalty)
@@ -123,13 +133,6 @@ class ChaseArena(gym.Env):
         return {"agent": self.agent.copy(), "enemies": self.enemies.copy(),
                 "outcome": outcome}
 
-    def _sample_agent(self) -> np.ndarray:
-        """A random agent start, kept off the walls and off the exit."""
-        while True:
-            pos = self.np_random.uniform(AGENT_MARGIN, ARENA - AGENT_MARGIN, size=2)
-            if np.hypot(*(pos - EXIT)) >= MIN_DIST_START_EXIT:
-                return pos
-
     def _sample_enemies(self, agent) -> np.ndarray:
         """`n_enemies` random spawns in the central region, clear of the agent and
         of each other."""
@@ -151,17 +154,19 @@ class ChaseArena(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
         options = options or {}
+        # The agent always starts at the corner (unless a test pins it explicitly).
         if options.get("agent_pos") is not None:
             self.agent = np.array(options["agent_pos"], dtype=np.float64)
-        elif self.random_start:
-            self.agent = self._sample_agent()
         else:
             self.agent = START.copy()
 
+        # Enemies: random each episode (default), fixed spawn, or test-pinned.
         if options.get("enemy_pos") is not None:
             self.enemies = np.array(options["enemy_pos"], dtype=np.float64).reshape(self.n_enemies, 2)
-        else:
+        elif self.random_enemies:
             self.enemies = self._sample_enemies(self.agent)
+        else:
+            self.enemies = FIXED_ENEMY_SPAWNS[self.n_enemies].copy()
 
         self.t = 0
         return self._obs(), self._info()

@@ -114,12 +114,13 @@ def _env_controls():
     max_steps = st.select_slider("Max steps per episode", [40, 60, 80, 120], 60,
         help="Metres of travel before an episode times out (one decision = 1 m). "
         "A corner-to-corner run is ~14 steps.")
-    random_start = st.checkbox("Randomize start each episode", value=False,
-        help="Off: you always start in the bottom-left corner. On: you start at a "
-        "random spot every episode, so the network must learn to escape from "
-        "anywhere — a harder generalisation test.")
+    random_enemies = st.checkbox("Randomize enemy positions each episode", value=True,
+        help="You always start in the bottom-left corner. On (default): the enemies "
+        "spawn somewhere new every episode, so the network must learn to read where "
+        "they are and generalise. Off: the enemies sit at a fixed spot, making the "
+        "whole episode deterministic — a warm-up where the net solves one layout.")
     return dict(enemy_speed=speed, max_steps=max_steps, n_enemies=n_enemies,
-                random_start=random_start)
+                random_enemies=random_enemies)
 
 
 def _algo_row():
@@ -195,14 +196,15 @@ def render():
             "watch the policy improve, and **▶️ Play** to run a fresh chase. Ignoring "
             "the enemy and beelining escapes only ~half the time; a policy that reads "
             "the enemy escapes ~95%. Add a **second enemy** (each one adds two inputs to "
-            "the net), or **randomize your start** to make it escape from anywhere.")
+            "the net), or untick *Randomize enemy positions* for a fixed, deterministic "
+            "warm-up layout.")
 
     # ── Row 1 — setup board + environment controls ──
     board_col, env_col = st.columns([3, 2])
     with env_col:
         env = _env_controls()
     env_kwargs = dict(enemy_speed=env["enemy_speed"], max_steps=env["max_steps"],
-                      n_enemies=env["n_enemies"], random_start=env["random_start"])
+                      n_enemies=env["n_enemies"], random_enemies=env["random_enemies"])
     obs_dim = 2 + 2 * env["n_enemies"]
     with board_col:
         board = st.empty()
@@ -218,7 +220,7 @@ def render():
     algo, train = _algo_row()
 
     # ── Train gate ──
-    sig = (env["enemy_speed"], env["max_steps"], env["n_enemies"], env["random_start"],
+    sig = (env["enemy_speed"], env["max_steps"], env["n_enemies"], env["random_enemies"],
            algo["n_episodes"], algo["gamma"], algo["lr"], algo["batch"],
            algo["train_freq"], algo["target_update"], algo["buffer"],
            algo["eps_kind"], algo["eps_params"])
