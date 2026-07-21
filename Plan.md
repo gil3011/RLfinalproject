@@ -6,7 +6,7 @@ This document outlines the design and architecture for a Streamlit-based interac
 
 ### Core Architecture & UI Rules
 
-* **Unifying Physical Theme:** Slippery surfaces (Ice physics) connect all 6 rooms. In Rooms 1–4 (discrete grid), this is modeled as stochastic slip probabilities. In Rooms 5–6 (continuous space), it is modeled as low friction, inertia, and momentum.
+* **Unifying Physical Theme:** Slippery surfaces (Ice physics) connect the rooms. In Rooms 1–4 (discrete grid), this is modeled as stochastic slip probabilities. In Room 6 (continuous space), it is modeled as low friction, inertia, and momentum. **Room 5 is the stated exception** — it was redesigned 2026-07-20 to direct, inertia-free movement (one chasing enemy, empty arena) for simplicity, so the ice theme does not apply there; see §Room 5.
 * **Minimal Text UI:** The user interface must remain clean and visual. Do not include lengthy theoretical or algorithmic explanations on the screen.
 * **Task-Only Descriptions:** Each room will display only a brief 1–2 sentence description of the **task/mission** (e.g., navigating hazards, dodging guards) at the top of the main view.
 * **Tooltip Parameter Explanations:** All controls, hyperparameters, and environment settings (rendered **on the page**, not the sidebar) must use Streamlit's native question-mark tooltip feature (using the `help="..."` argument inside widgets) to explain their mathematical or mechanical purpose.
@@ -462,19 +462,153 @@ shield machinery would tangle the shared class. Instead:
 
 ---
 
-### Room 5: Deep Q-Learning (Continuous Physics & Momentum)
+### Room 5: Deep Q-Learning (Continuous Arena, One Chasing Enemy)
 
-* **Task Description:** Slide across a continuous 10x10 meter icy arena while counteracting strong side-wind currents pushing you off course.
-* **State & Action Space:** Continuous state vector $(X, Y, V_x, V_y)$, discrete acceleration actions $\Delta V \in \{-1, 0, 1\}$ updated every 0.02 seconds.
-* **On-page Controls (with tooltips):**
-* **Physics:** Ice friction coefficient $\mu$ (`0.80` for normal floor to `0.98` for extreme ice), wind zone force (`-3.0` to `+3.0` $m/s^2$), goal target radius (`0.3` to `1.0` meters). **Goal Reward: +100**.
-* **Neural Network:** Adam learning rate (`1e-4` to `1e-2`), batch size (`16` to `128`), replay buffer size (`1,000` to `10,000`), target network update frequency.
+> **Task redesigned 2026-07-20 (user: "simple yet challenging — a moving enemy; if he
+> catches you the episode ends with −100").** The previous spec — three patrol guards,
+> two static walls, low-friction momentum — was built, then **stashed and reset**
+> (`git stash@{0}` "room5 wip"). This is a deliberate strip-down to the room's essence:
+> an **empty** arena, **one enemy that chases the agent**, and **direct, inertia-free
+> movement**. **Build status (2026-07-20): BUILT end-to-end and verified.** `core/chase_arena.py`
+> (`gymnasium.Env`, passes `check_env`, `code examples/dql` 5-tuple API); `algorithms/deep_q.py`
+> (Double-DQN training, adapted from `code examples/dql/dqn.py`); `rooms/room5_dqn.py` (the UI),
+> registered in `streamlit_app.py`; `torch`/`gymnasium` added to `requirements.txt`. AppTest
+> passes the full flow (train → scrubber → Play, no exceptions). The enemy-speed band **and**
+> the learned escape rate are measured (below).
+>
+> **✅ THE DQN FINDING — Double DQN is what makes the room work; a single-net DQN collapses.**
+> Traced (not assumed): a vanilla DQN on this env **diverged and went state-blind** — greedy
+> policies loitered at the start corner with `max Q ≈ 6` in reward-units where the best return
+> is ~2 (≈3× overestimation), escaping **0–35%**, *below* the 51% beeline, and **bimodal** across
+> seeds (a run either learned or collapsed to 0%). Two standard, faithful fixes cure it together:
+> **(1) Double DQN** (select the next action with the online net, evaluate with the target net)
+> and **(2) reward scaling to the network** (the env keeps ±100 for the scoreboard; the learner
+> trains on ±1). With both, plus shaping_coef 5 and Adam 3e-4: **speed 0.75 → 93% escape over 3
+> seeds (100/81/99), no collapse** — right at the scripted-skilled ceiling of 95%, capturing the
+> full 51%→93% gap. This mirrors the old maze build's lesson ("lr and reward scale decide it"),
+> now pinned to the specific cure. Room defaults: 800 episodes, decaying ε (1.0→0.05, 0.995),
+> Double DQN on, reward_scale 0.01.
 
+* **Task Description:** Cross an empty continuous 10×10 m room from the bottom-left corner to the top-right exit while a single enemy hunts you across the open floor. Touching the enemy ends the episode at −100.
 
-* **KPI Metrics:** Average time to goal (seconds), average velocity, mean predicted Q-value.
-* **Visualizations:**
-* Neural network TD-error / loss curve over training steps.
-* Smooth 60fps HTML5/Plotly animation showing real-time sliding trajectories and momentum correction against wind fields.
+> **⚠️ Room 5 drops the ice theme — deliberate user decision.** §1's unifying rule models
+> Rooms 5–6's slipperiness as low friction / inertia. Room 5 now uses **direct movement**
+> (the agent lands exactly where it aims; no momentum), chosen for the simplest possible
+> redesign. So "slippery surfaces connect all six rooms" holds for Rooms 1–4 and 6 only,
+> and Room 5 is the stated exception. Momentum is the single physics knob to re-add if the
+> theme is ever wanted back — the enemy and reward machinery are independent of it.
+
+* **State & Action Space:** Continuous state `[x, y]` + per enemy `[eₓ−x, e_y−y]` — the agent's position plus each **enemy's position relative to the agent** → `obs_dim = 2 + 2·n_enemies` (**4** with one enemy, **6** with two). No velocity components: movement is inertia-free, so the action *is* the displacement and there is no momentum to carry in the state. **9 discrete actions** assign a displacement $(dx, dy) \in \{-1,0,1\}$, **normalised so every non-zero move travels exactly 1 m** (diagonals therefore ≈0.707 m per axis — flat *speed*, not flat components). **One decision = one metre**; a corner-to-corner run is ~14 steps.
+
+* **The enemy is the whole room.** One marker **spawns at a random position each episode** (central region, kept ≥3 m clear of the agent's corner so it is never an instant catch) and, each step, moves a fixed fraction of the agent's speed **straight toward the agent's current position** (greedy pursuit). The agent cannot simply beeline: half the time the enemy sits across the direct line, so the agent must **arc around** it — exactly the behaviour the relative-enemy input exists to let the network learn. The enemy being **slower than the agent** is what keeps the room winnable: once the agent gets the enemy behind it, a slower pursuer can no longer close before the exit.
+
+> **Why the enemy spawns RANDOMLY (not at a fixed point).** With a fixed enemy the whole
+> env is deterministic, so any policy escapes 0% or 100% — no band to measure, and nothing
+> for the network to generalise (it would memorise one trajectory). A random spawn makes
+> "escape rate" a smooth number **and forces the network to actually read the relative-enemy
+> input** rather than memorise a path. Agent start and exit stay fixed (the corner-to-corner
+> run is the lesson, as in Rooms 3–4); only the enemy moves.
+
+> **✅ MEASURED 2026-07-20 — the speed band is real, not hoped-for (5 placement seeds ×
+> 400–500 random spawns, `scratchpad/measure_band.py`).** Escape rate of a **naive beeline**
+> (ignore the enemy) vs a **scripted evasive** ceiling (attract-to-exit + repel-from-enemy
+> potential field): **speed 0.75 → beeline 51% ± 1, skilled 95% ± 1, a 44-point gap** — the
+> largest in the sweep, and the learnable advantage the DQN exists to capture. The gap is a
+> hump: it falls below ~0.65 (enemy too slow — beeline creeps up) and above ~0.85 (even
+> skilled play drops — 73% at 0.90, 58% at equal speed 1.0, the old "bimodal" ceiling). So
+> the **enemy-speed slider is capped below 1.0, range `0.50`–`0.95`, default `0.75`** — the
+> sweet spot. This is the room's guarantee stated as a number: at the default, a good policy
+> escapes ~95% where ignoring the enemy escapes ~50%.
+  * **Catch = contact:** the episode ends at −100 the instant `‖agent − enemy‖ < catch_radius` (≈0.5 m). Resolve the catch **after both have moved**, and test it against the **swept** agent segment too, so the pair cannot tunnel past each other in a single 1 m step (verify).
+
+> **The old "greedy chaser is BIMODAL" worry was resolved by the random spawn.** The
+> earlier build saw an enemy at equal speed *always* catch and one notch slower *never*
+> catch — but that was a **fixed, deterministic** setup, where outcome is all-or-nothing.
+> Randomising the spawn and measuring (above) shows a wide, smooth band with a 44-point
+> naive-vs-skilled gap at 0.75. The chaser is kept as-is; no reaction lag or turn-rate cap
+> is needed (both were considered and are **not** used — they would have grown the
+> observation past 4 dims). Do not "restore" patrols.
+* **The agent's 9 moves** — the 8 compass directions plus a stay-put, indexed in this fixed order (the network's output layer is indexed by it, so it must never be reordered):
+
+  | # | $(V_x, V_y)$ | direction | # | $(V_x, V_y)$ | direction | # | $(V_x, V_y)$ | direction |
+  |---|---|---|---|---|---|---|---|---|
+  | 0 | $(-1,-1)$ | ↙ down-left | 3 | $(0,-1)$ | ↓ down | 6 | $(1,-1)$ | ↘ down-right |
+  | 1 | $(-1,0)$ | ← left | 4 | $(0,0)$ | · stay put | 7 | $(1,0)$ | → right |
+  | 2 | $(-1,1)$ | ↖ up-left | 5 | $(0,1)$ | ↑ up | 8 | $(1,1)$ | ↗ up-right |
+
+  The four cardinal moves travel 1 m along one axis; the four diagonals travel 1 m total (≈0.707 m per axis); action 4 holds position (0 m) — mostly useless against a pursuer, but kept so the action space matches Room 6. There are **no walls**; only the arena boundary clamps a move. (The moves are a displacement, not a velocity — with no momentum the two coincide; the $(V_x,V_y)$ labels above read as "metres this step".)
+* **Rewards (drive the curves below):** exit **+100**, caught **−100**, plus a potential-based shaping term toward the exit. With no walls the path to the exit is a straight line, so the shaping potential is just the **Euclidean** distance to the exit — the through-the-walls geodesic machinery the old spec needed is gone. Goal reward is fixed at +100 (no slider).
+
+> **✅ A timeout penalty in the LEARNING signal was requested, measured, and REJECTED —
+> Room 3's lesson reproduced here (2026-07-20, user: "make timeout −100, force the agent to
+> exit").** There is nothing to force: at the defaults the trained agent **already times out
+> 0%** of the time (escape 93%, caught 6%). Adding −100 on timeout *to the learner* made it
+> **worse** — timeouts rose 0%→5% and escape fell 93%→90%, exactly the non-Markov poison
+> §2 documents (elapsed time `t` is not in the 4-D state, so the penalty lands on whatever
+> *position* the clock stopped in). A **step cost** — the Markov alternative — was worse
+> still: it makes the agent rush the exit and run into the enemy (caught 6%→13–34%, escape
+> down to 56–73%). So the −100 for a loss stays **on the scoreboard only** (`LOSS_SCORE`,
+> shown on a timed-out ▶️ Play, mirroring the +100 exit and Rooms 2–4); the learner never
+> sees it. Same conclusion as Rooms 1 and 3: punish dithering, if at all, never through a
+> timeout the state cannot see.
+
+**On-page controls (every widget carries a `help=` tooltip):**
+
+* **🎮 Environment** (Row-1 board panel):
+  * **Enemy speed (× yours)** — slider `0.50`–`0.95`, default **`0.75`** (MEASURED — peak naive-vs-skilled gap; see the band above). Capped below 1.0 because at equal speed even a good policy escapes only ~58%. Renamed from "Patrol speed" because the enemy now chases rather than sweeps. (No 🎲 Regenerate — geometry is fixed, as in Rooms 3–4. No goal-reward slider.)
+  * **Max steps per episode** — select `{40, 60, 80, 120}`, default **`60`**.
+  * **Number of enemies** — 1 or 2 (default **1**), added 2026-07-20 (user). A second
+    chaser adds two inputs to the network (its relative position → `obs_dim` 6) and is
+    much harder to shake — this is Room 5's cheap echo of Room 4's "each coin doubles the
+    tabular table" pain: here another enemy is **two more floats**, not a state explosion.
+  * **Randomize enemy positions each episode** — checkbox (default **on**), added 2026-07-20
+    (user; revised same day from an agent-start toggle to an *enemy* toggle — "agent starts at
+    the same point but the enemies at random locations when checked"). The **agent always
+    starts at the corner** (the fixed lesson). **On:** enemies spawn randomly each episode —
+    what forces the net to read the relative-enemy inputs and generalise, and what makes
+    escape-rate a smooth number. **Off:** enemies sit at fixed spawns (`FIXED_ENEMY_SPAWNS`)
+    and, with the agent fixed too, the episode is **deterministic** — a warm-up where the net
+    only has to solve one layout.
+
+> **✅ MEASURED (speed 0.75, 800 ep).** Random enemies (the default): **1 enemy 89%, 2 enemies
+> 86%** escape — two enemies barely dents it, because the extra threat is only two more input
+> floats, not a state explosion (the room's point, and the deliberate contrast with Room 4's
+> "a second coin doubles the table"). Fixed enemies (deterministic warm-up): **winnable** —
+> the 1-enemy layout escapes in 18 steps, and the flanking 2-enemy layout `[(3.5,6.5),
+> (6.5,3.5)]` is solved by the DQN at 800 episodes (17 steps) even though the scripted evader
+> is caught by that pincer. None of the four combinations is impossible.
+* **🧠 Deep Q-Network** (Row-2 algorithm section), laid out in four columns + an ε row. ⚠️ **These defaults were tuned for the old spec (16-dim obs, walls, three guards) — re-check them on the simpler MDP.** `obs_dim` drops 16→4 and the reward landscape is smoother, so the network may converge in **fewer** episodes; the geodesic wall-cell shaping bug that dominated the old build's fate no longer exists (no walls), but the learning rate is still the first thing to sweep.
+  * **Training episodes** — slider `100`–`1500`, default **`500`**.
+  * **Discount γ** — slider `0.80`–`0.999`, default **`0.99`**.
+  * **Adam learning rate** — select `{1e-4, 3e-4, 1e-3, 3e-3, 1e-2}`, default **`3e-4`**.
+  * **Batch size** — select `{16, 32, 64, 128}`, default **`64`**.
+  * **Gradient step every N ticks** (`train_freq`) — select `{1, 2, 4, 8}`, default **`4`**.
+  * **Replay buffer** — select `{1k, 5k, 10k, 50k, 100k}`, default **`50k`**.
+  * **Target update (steps)** — select `{100, 250, 500, 1k, 2k}`, default **`500`**.
+  * **Exploration ε** — selector **Decaying (default) / Constant**, matching Rooms 2–4 and sharing `monte_carlo.epsilon_at`; on its own full-width row. Decaying exposes **ε start** (`0.1`–`1.0`, def `1.0`), **ε minimum** (`0.0`–`0.5`, def `0.05`), **ε decay rate** (`0.980`–`0.9999`, def `0.99`); Constant exposes a single ε slider.
+  * **No random-seed control** — each 🚀 Train draws a fresh seed, so re-training a poor run gives a different outcome.
+* **🚀 Train** trains synchronously behind an `st.spinner` (seconds at these defaults — no background thread), then gates all results until the `sig` of the current setup matches.
+
+**Board (continuous arena, not a cell grid):** a square Plotly figure over `x, y ∈ [0, 10]` m (`scaleanchor` + `constrain="domain"` on **both** axes so metres stay square and the arena fills the frame).
+
+* **Static layer:** 🤖 start (bottom-left), 🏁 exit (green circle, radius 0.5 m, top-right), and **one 🔴 enemy** (fatal on contact) at its current position. **No walls.** ⚠️ These are Plotly **shapes/markers drawn with `layer="above"`** — `layer="below"` means below *traces*, and the value field is a Heatmap trace, so anything "below" is painted over and vanishes.
+* **⭐ Value layer:** the trained network sampled as $\max_a Q(x, y, \cdot)$ on a **50×50 grid** and drawn as an `RdBu` heatmap, `zmid=0` (high value **blue**). This is the room's visual argument for function approximation — a value field that exists *between* the sample points, which no tabular room can show. ⚠️ **The value now depends on the enemy's position** (`obs = [x, y, eₓ−x, e_y−y]`), which a 2-D board cannot show all at once: sample it **holding the enemy at its currently-drawn position** and say so in the caption — the heatmap is a **slice** of a 4-D function, not the whole thing. (The old fixed-guard version dodged this; the chaser makes it explicit, which is fair to show.) Toggled by a **"Show the network's value field"** checkbox.
+* **▶️ Play Episode** animates one greedy rollout, **one metre per frame**, with the enemy drawn at its true per-frame position (the trajectory records it); the agent marker turns **red** on a catch. Reports the outcome (✅ escaped / 🔴 caught / ⏱️ timed out), step count, and undiscounted return.
+* A **checkpoint scrubber** ("view episode N") replays the greedy rollout captured at intervals during training, so the policy can be watched improving.
+
+**KPI Metrics** (`st.metric` row, for the trained network):
+
+* **Escape rate (last 100 episodes)** — share of recent training episodes that reached the exit.
+* **🔴 Caught** — training episodes ended by the enemy.
+* **Mean steps to exit** — averaged over successful episodes (one step = one metre).
+* **Mean predicted Q** — the network's own late-training value estimate (there is no exact answer to check it against in a continuous room).
+
+**Graphs (full-width analytics row below the board):**
+
+* **Episode return** — per-episode return scatter with a moving-average line.
+* **Network training** — TD loss (Huber) and mean predicted Q on a shared dual-axis plot, over gradient steps.
+* **Cumulative outcomes** — running totals of escaped / caught / timed-out.
+* **Exploration rate** — the ε schedule over episodes (Room 2's convention).
 
 
 
@@ -507,7 +641,7 @@ shield machinery would tangle the shared class. Instead:
 | **2** | Monte Carlo | Discrete (10x10) | Model-Free (Episodes) | High Variance / Empirical | Escaping teleport portals and infinite loops |
 | **3** | SARSA (On-Policy) | Discrete (10x10 **× shield flag**) | Model-Free (Step-by-Step) | **Conservative & Safe** | Crossing an icy ledge over a fatal abyss |
 | **4** | Q-Learning (Off-Policy) | Discrete (10x10 **× guard phase × coin flag**) | Model-Free (Step-by-Step) | **Over-optimistic about risk** | Timing a patrol, or braving the ledge for a coin |
-| **5** | Deep Q-Learning | Continuous (10x10m) | Model-Free (NN Approx) | Smooth & Momentum-Aware | Counteracting low friction and wind zones |
+| **5** | Deep Q-Learning | Continuous (10x10m, +enemy-relative) | Model-Free (NN Approx) | Evasive & Reactive | Outrunning a chasing enemy to the exit |
 | **6** | Advanced DQL | Continuous + Radar | Limited Sensor Rays | **Generalizable Avoidance** | Navigating dynamic obstacles with radar range $X$ |
 
 ---
