@@ -55,42 +55,56 @@ from gymnasium import spaces
 #    moves. Only the enemies (and optionally the agent start) vary per episode. ──
 ARENA = 10.0
 START = np.array([0.5, 0.5], dtype=np.float64)       # 🤖 bottom-left (fixed start)
-EXIT = np.array([9.5, 9.5], dtype=np.float64)        # 🏁 top-right
-GOAL_RADIUS = 0.5                                    # within this of EXIT ⇒ escaped
+EXIT = np.array([9.5, 9.5], dtype=np.float64)        # 🏁 top-right (centre of the goal square)
+GOAL_HALF = 0.5                                      # goal is a 1×1 m square: |x−Eₓ|,|y−E_y| < ½
 CATCH_RADIUS = 0.5                                   # within this of an enemy ⇒ caught
 STEP = 1.0                                           # agent moves 1 m per decision
 
 # Spawn regions and clear-zones so a fresh episode is never an instant death.
 SPAWN_LO, SPAWN_HI = 1.5, 8.5                        # enemy spawn box
 MIN_DIST_AGENT_ENEMY = 3.0                           # enemy never spawns on top of the agent
-MIN_DIST_ENEMIES = 2.0                               # two enemies start apart
+MIN_DIST_ENEMIES = 2.0                               # enemies start apart
 
-# Fixed enemy spawns used when randomisation is OFF. The agent is always at START,
-# so the episode is then deterministic — a warm-up mode. Positions are clear of the
-# corner, the exit, and each other, and sit across the direct diagonal.
+# Fixed enemy spawns used when randomisation is OFF, keyed by enemy count. The agent
+# is always at START, so the episode is then deterministic — a warm-up mode.
+# Positions are clear of the corner, the exit, and each other.
 FIXED_ENEMY_SPAWNS = {
+    0: np.zeros((0, 2), dtype=np.float64),
     1: np.array([[5.0, 5.0]], dtype=np.float64),
     2: np.array([[3.5, 6.5], [6.5, 3.5]], dtype=np.float64),
+    3: np.array([[5.0, 5.0], [2.5, 7.0], [7.0, 2.5]], dtype=np.float64),
 }
 
-# ── Enemy behaviours (each a function of OBSERVED state only — the agent's
-#    position — so the env stays Markov). Two pure-pursuit enemies collapse onto
-#    the same pursuit curve and move in lockstep; giving the second one a rotated
-#    "flanking" approach keeps them apart and makes 2-enemy mode a real pincer
-#    rather than one doubled dot. ──
-PURSUIT = "pursuit"      # aims straight at the agent — trails from behind
-FLANK = "flank"          # pursues along a rotated path — approaches from the side
-_FLANK_DEG = 45.0        # how far the flanker's heading is rotated off the direct line
+# ── Enemy behaviours (each a function of OBSERVED state only — the agent's and
+#    enemies' positions and the fixed exit — so the env stays Markov). Pure-pursuit
+#    enemies collapse onto the same pursuit curve and move in lockstep; different
+#    behaviours + mutual repulsion keep them apart and make a real multi-sided
+#    pincer rather than one doubled dot. ──
+PURSUIT = "pursuit"      # Chaser: aims straight at the agent — trails from behind
+FLANK = "flank"          # Flanker: pursuit heading rotated +deg — curves in from one side
+AMBUSH = "ambush"        # Ambusher: pursuit heading rotated −deg AND wider — the other side
+_FLANK_DEG = 45.0        # the flanker's rotation off the direct line
+_AMBUSH_DEG = -72.0      # the ambusher's rotation (opposite side, wider → almost side-on)
 _FC, _FS = np.cos(np.radians(_FLANK_DEG)), np.sin(np.radians(_FLANK_DEG))
+_AC, _AS = np.cos(np.radians(_AMBUSH_DEG)), np.sin(np.radians(_AMBUSH_DEG))
 
-# Mutual repulsion: enemies push away from each other when closer than this, so two
-# hunters can't stack on the same spot behind the agent — they split to opposite
-# sides (a pincer). Depends only on the enemies' positions, so it stays Markov.
+# Mutual repulsion: enemies push away from each other when closer than this, so the
+# hunters can't stack on the same spot — they split to different sides (a pincer).
+# Depends only on the enemies' positions, so it stays Markov.
 REPEL_RADIUS = 3.0
 REPEL_STRENGTH = 1.2
 
-# Default role per enemy count: one Chaser, and (with two) one Flanker.
-DEFAULT_ENEMY_KINDS = {1: (PURSUIT,), 2: (PURSUIT, FLANK)}
+# The three enemy TYPES, in a fixed order (the observation packs active enemies in
+# this order, so the network's inputs stay consistent).
+ENEMY_TYPES = (PURSUIT, FLANK, AMBUSH)
+
+# Default kinds by count (used when enemy_kinds isn't given explicitly).
+DEFAULT_ENEMY_KINDS = {
+    0: (),
+    1: (PURSUIT,),
+    2: (PURSUIT, FLANK),
+    3: (PURSUIT, FLANK, AMBUSH),
+}
 
 # The 9 moves, indexed exactly as Plan.md §Room 5's table: dx = a//3 − 1,
 # dy = a%3 − 1. Non-zero moves are normalised to a 1 m step below.
@@ -115,8 +129,8 @@ def _min_dist_moving(a0, a1, e0, e1) -> float:
 
 class ChaseArena(gym.Env):
     """Continuous chase arena for Room 5. Observation is `2 + 2·n_enemies`-D and
-    normalised; 9 discrete actions; one or two pure-pursuit enemies, each ending
-    the episode on contact."""
+    normalised; 9 discrete actions; 0–3 enemies (each a Chaser / Flanker / Ambusher),
+    any of which ends the episode on contact."""
 
     metadata = {"render_modes": []}
 
@@ -124,9 +138,9 @@ class ChaseArena(gym.Env):
         self,
         enemy_speed: float = 0.70,      # fraction of the agent's 1 m/step (< 1 to be winnable)
         max_steps: int = 60,
-        n_enemies: int = 1,             # 1 or 2 enemies
+        n_enemies: int = None,          # ignored if enemy_kinds is given
         random_enemies: bool = True,    # random enemy spawn each episode (off ⇒ fixed spawn)
-        enemy_kinds=None,               # per-enemy behaviour; default one Chaser (+ one Interceptor)
+        enemy_kinds=None,               # tuple of active enemy behaviours (0–3); primary
         shaping_coef: float = 1.0,      # dense progress-toward-exit reward per metre gained
         goal_reward: float = 100.0,
         catch_penalty: float = 100.0,
@@ -134,10 +148,12 @@ class ChaseArena(gym.Env):
         super().__init__()
         self.enemy_speed = float(enemy_speed)
         self.max_steps = int(max_steps)
-        self.n_enemies = int(n_enemies)
+        if enemy_kinds is not None:
+            self.enemy_kinds = tuple(enemy_kinds)
+        else:
+            self.enemy_kinds = DEFAULT_ENEMY_KINDS[1 if n_enemies is None else n_enemies]
+        self.n_enemies = len(self.enemy_kinds)
         self.random_enemies = bool(random_enemies)
-        self.enemy_kinds = tuple(enemy_kinds) if enemy_kinds else DEFAULT_ENEMY_KINDS[self.n_enemies]
-        assert len(self.enemy_kinds) == self.n_enemies, "enemy_kinds must match n_enemies"
         self.shaping_coef = float(shaping_coef)
         self.goal_reward = float(goal_reward)
         self.catch_penalty = float(catch_penalty)
@@ -164,9 +180,9 @@ class ChaseArena(gym.Env):
 
     def _enemy_move_dir(self, kind, e0, agent):
         """Unit step direction for an enemy this step. Depends only on the enemy's
-        and agent's positions, so the dynamics stay Markov. A Flanker rotates the
-        pursuit direction by a fixed angle, so it curves in from the side instead of
-        trailing directly behind like the Chaser."""
+        and agent's positions, so the dynamics stay Markov. The Chaser aims straight
+        at the agent; the Flanker and Ambusher rotate that heading (opposite signs,
+        different magnitudes) so they curve in from different sides."""
         to_agent = agent - e0
         d = float(np.hypot(to_agent[0], to_agent[1]))
         if d < 1e-9:
@@ -174,11 +190,15 @@ class ChaseArena(gym.Env):
         u = to_agent / d
         if kind == FLANK:
             u = np.array([_FC * u[0] - _FS * u[1], _FS * u[0] + _FC * u[1]])
+        elif kind == AMBUSH:
+            u = np.array([_AC * u[0] - _AS * u[1], _AS * u[0] + _AC * u[1]])
         return u
 
     def _sample_enemies(self, agent) -> np.ndarray:
         """`n_enemies` random spawns in the central region, clear of the agent and
         of each other."""
+        if self.n_enemies == 0:
+            return np.zeros((0, 2), dtype=np.float64)
         placed = []
         for _ in range(self.n_enemies):
             for _try in range(200):
@@ -225,7 +245,7 @@ class ChaseArena(gym.Env):
         e1s = np.empty_like(e0s)
         caught = False
         for i, e0 in enumerate(e0s):
-            u = self._enemy_move_dir(self.enemy_kinds[i], e0, a0)   # chaser or flanker
+            u = self._enemy_move_dir(self.enemy_kinds[i], e0, a0)   # chaser / flanker / ambusher
             for j, o0 in enumerate(e0s):                            # + mutual repulsion
                 if j == i:
                     continue
@@ -244,7 +264,8 @@ class ChaseArena(gym.Env):
         self.agent, self.enemies = a1, e1s
         self.t += 1
 
-        reached = float(np.hypot(*(a1 - EXIT))) < GOAL_RADIUS
+        # Goal is a 1×1 m square centred on EXIT (Chebyshev, not a circle).
+        reached = abs(a1[0] - EXIT[0]) < GOAL_HALF and abs(a1[1] - EXIT[1]) < GOAL_HALF
         d_old = float(np.hypot(*(a0 - EXIT)))
         d_new = float(np.hypot(*(a1 - EXIT)))
         reward = self.shaping_coef * (d_old - d_new)       # dense progress toward exit

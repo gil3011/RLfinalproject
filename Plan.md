@@ -489,7 +489,7 @@ shield machinery would tangle the shared class. Instead:
 > now pinned to the specific cure. Room defaults: 800 episodes, decaying ε (1.0→0.05, 0.995),
 > Double DQN on, reward_scale 0.01.
 
-* **Task Description:** Cross an empty continuous 10×10 m room from the bottom-left corner to the top-right exit while a single enemy hunts you across the open floor. Touching the enemy ends the episode at −100.
+* **Task Description:** Cross an empty continuous 10×10 m room from the bottom-left corner to the top-right exit (a 1×1 m square) while up to three enemies hunt you across the open floor. Touching any enemy ends the episode at −100.
 
 > **⚠️ Room 5 drops the ice theme — deliberate user decision.** §1's unifying rule models
 > Rooms 5–6's slipperiness as low friction / inertia. Room 5 now uses **direct movement**
@@ -498,7 +498,7 @@ shield machinery would tangle the shared class. Instead:
 > and Room 5 is the stated exception. Momentum is the single physics knob to re-add if the
 > theme is ever wanted back — the enemy and reward machinery are independent of it.
 
-* **State & Action Space:** Continuous state `[x, y]` + per enemy `[eₓ−x, e_y−y]` — the agent's position plus each **enemy's position relative to the agent** → `obs_dim = 2 + 2·n_enemies` (**4** with one enemy, **6** with two). No velocity components: movement is inertia-free, so the action *is* the displacement and there is no momentum to carry in the state. **9 discrete actions** assign a displacement $(dx, dy) \in \{-1,0,1\}$, **normalised so every non-zero move travels exactly 1 m** (diagonals therefore ≈0.707 m per axis — flat *speed*, not flat components). **One decision = one metre**; a corner-to-corner run is ~14 steps.
+* **State & Action Space:** Continuous state `[x, y]` + per enemy `[eₓ−x, e_y−y]` — the agent's position plus each **enemy's position relative to the agent** → `obs_dim = 2 + 2·n_enemies` (**2** with no enemies up to **8** with three). No velocity components: movement is inertia-free, so the action *is* the displacement and there is no momentum to carry in the state. **9 discrete actions** assign a displacement $(dx, dy) \in \{-1,0,1\}$, **normalised so every non-zero move travels exactly 1 m** (diagonals therefore ≈0.707 m per axis — flat *speed*, not flat components). **One decision = one metre**; a corner-to-corner run is ~14 steps.
 
 * **The enemy is the whole room.** One marker **spawns at a random position each episode** (central region, kept ≥3 m clear of the agent's corner so it is never an instant catch) and, each step, moves a fixed fraction of the agent's speed **straight toward the agent's current position** (greedy pursuit). The agent cannot simply beeline: half the time the enemy sits across the direct line, so the agent must **arc around** it — exactly the behaviour the relative-enemy input exists to let the network learn. The enemy being **slower than the agent** is what keeps the room winnable: once the agent gets the enemy behind it, a slower pursuer can no longer close before the exit.
 
@@ -557,19 +557,22 @@ shield machinery would tangle the shared class. Instead:
 * **🎮 Environment** (Row-1 board panel):
   * **Enemy speed (× yours)** — slider `0.50`–`0.95`, default **`0.75`** (MEASURED — peak naive-vs-skilled gap; see the band above). Capped below 1.0 because at equal speed even a good policy escapes only ~58%. Renamed from "Patrol speed" because the enemy now chases rather than sweeps. (No 🎲 Regenerate — geometry is fixed, as in Rooms 3–4. No goal-reward slider.)
   * **Max steps per episode** — select `{40, 60, 80, 120}`, default **`60`**.
-  * **Number of enemies** — 1 or 2 (default **1**), added 2026-07-20 (user). A second
-    enemy adds two inputs to the network (its relative position → `obs_dim` 6) — Room 5's
-    cheap echo of Room 4's "each coin doubles the tabular table": here another enemy is
-    **two more floats**, not a state explosion. **The two enemies use different behaviours
-    so they don't move as one** (user, 2026-07-20 — "make them move differently"): a
-    🔴 **Chaser** (pure pursuit, head-on) and a 🟠 **Flanker** (pursuit along a heading
-    rotated 45° off the direct line, curving in from the side), plus **mutual repulsion**
-    so they split to opposite sides instead of stacking on the same pursuit curve. All
-    three effects are functions of *observed* positions only, so the env stays Markov —
-    unlike lead pursuit (needs the agent's velocity, not in the obs) or an exit-guarding
-    interceptor (measured: camps the one cell the agent must reach → escape ~1–7%,
-    unwinnable, rejected). Measured (0.75, 800 ep, 3 seeds): **escape 93% (sd 5)**, mean
-    enemy-gap 3.1 m (vs 2.5 m for two identical pursuers).
+  * **Enemies — three on/off toggles, 0–3 active** (default just the Chaser), added
+    2026-07-20 (user: "add a third enemy with different algorithm, allow the user to turn
+    each on or off, 0–3 possible"). Each active enemy adds two inputs (`obs_dim = 2 + 2n`,
+    2→8) — Room 5's cheap echo of Room 4's "each coin doubles the tabular table": another
+    hunter is **two more floats**, not a state explosion. **Three different behaviours so
+    they never move as one**, each a function of *observed* positions only (Markov):
+    🔴 **Chaser** (pure pursuit, head-on), 🟠 **Flanker** (heading rotated +45°, curves in
+    from a side), 🟣 **Ambusher** (rotated −72°, sweeps in almost side-on from the other
+    side), plus **mutual repulsion** so they split to different sides instead of stacking.
+    Rejected (measured): an exit-guarding interceptor (camps the one cell the agent must
+    reach → escape ~1–7%, unwinnable) and lead pursuit (needs the agent's velocity, not in
+    the obs → non-Markov). **Difficulty scales steeply with count** (measured escape):
+    **1 enemy ~95%, 2 ~93% (0.75, 800 ep), 3 ~70% (0.55, 1500 ep — needs the lower speed and
+    more episodes; ~17% at 0.75/800)**. The scripted-evader ceiling for 3 is ~50–64%, so 3
+    is genuinely hard but winnable — the About text and the speed tooltip tell the user to
+    drop the speed and raise episodes for three.
   * **Randomize enemy positions each episode** — checkbox (default **on**), added 2026-07-20
     (user; revised same day from an agent-start toggle to an *enemy* toggle — "agent starts at
     the same point but the enemies at random locations when checked"). The **agent always
@@ -588,7 +591,7 @@ shield machinery would tangle the shared class. Instead:
 > is caught by that pincer. None of the four combinations is impossible.
 * **🧠 Deep Q-Network** (Row-2 algorithm section), laid out in four columns + an ε row. ⚠️ **These defaults were tuned for the old spec (16-dim obs, walls, three guards) — re-check them on the simpler MDP.** `obs_dim` drops 16→4 and the reward landscape is smoother, so the network may converge in **fewer** episodes; the geodesic wall-cell shaping bug that dominated the old build's fate no longer exists (no walls), but the learning rate is still the first thing to sweep.
   * **Training episodes** — slider `100`–`1500`, default **`500`**.
-  * **Discount γ** — slider `0.80`–`0.999`, default **`0.99`**.
+  * **Discount γ** — slider `0.50`–`0.99`, default **`0.99`** (widened down to 0.50 on user request 2026-07-20; low γ is short-sighted and can fail to value the distant exit).
   * **Adam learning rate** — select `{1e-4, 3e-4, 1e-3, 3e-3, 1e-2}`, default **`3e-4`**.
   * **Batch size** — select `{16, 32, 64, 128}`, default **`64`**.
   * **Gradient step every N ticks** (`train_freq`) — select `{1, 2, 4, 8}`, default **`4`**.
@@ -600,21 +603,22 @@ shield machinery would tangle the shared class. Instead:
 
 **Board (continuous arena, not a cell grid):** a square Plotly figure over `x, y ∈ [0, 10]` m (`scaleanchor` + `constrain="domain"` on **both** axes so metres stay square and the arena fills the frame).
 
-* **Static layer:** 🤖 start (bottom-left), 🏁 exit (green circle, radius 0.5 m, top-right), and **one 🔴 enemy** (fatal on contact) at its current position. **No walls.** ⚠️ These are Plotly **shapes/markers drawn with `layer="above"`** — `layer="below"` means below *traces*, and the value field is a Heatmap trace, so anything "below" is painted over and vanishes.
+* **Static layer:** 🤖 start (bottom-left), 🏁 exit (green **1×1 m square**, top-right — enlarged from a 0.5 m circle on user request 2026-07-20; reached = Chebyshev `|x−Eₓ|,|y−E_y| < ½`), and **0–3 enemies** (🔴 chaser / 🟠 flanker / 🟣 ambusher, each fatal on contact, colour-coded by behaviour) at their current positions. **No walls.** ⚠️ These are Plotly **shapes/markers drawn with `layer="above"`** — `layer="below"` means below *traces*, and the value field is a Heatmap trace, so anything "below" is painted over and vanishes.
 * **⭐ Value layer:** the trained network sampled as $\max_a Q(x, y, \cdot)$ on a **50×50 grid** and drawn as an `RdBu` heatmap, `zmid=0` (high value **blue**). This is the room's visual argument for function approximation — a value field that exists *between* the sample points, which no tabular room can show. ⚠️ **The value now depends on the enemy's position** (`obs = [x, y, eₓ−x, e_y−y]`), which a 2-D board cannot show all at once: sample it **holding the enemy at its currently-drawn position** and say so in the caption — the heatmap is a **slice** of a 4-D function, not the whole thing. (The old fixed-guard version dodged this; the chaser makes it explicit, which is fair to show.) Toggled by a **"Show the network's value field"** checkbox.
-* **▶️ Play Episode** animates one greedy rollout, **one metre per frame**, with the enemy drawn at its true per-frame position (the trajectory records it); the agent marker turns **red** on a catch. Reports the outcome (✅ escaped / 🔴 caught / ⏱️ timed out), step count, and undiscounted return.
+* **▶️ Play Episode** animates one greedy rollout, **one metre per frame**, with the enemies drawn at their true per-frame positions (the trajectory records them); the agent marker turns **red** on a catch. Reports the outcome (✅ escaped / 🔴 caught / ⏱️ timed out), step count, and return (a **flat −100 for any loss**, mirroring the +100 exit; the raw is shown in a caption). Play has **its own "Randomize enemy positions" checkbox** (user 2026-07-20), independent of the training one, so you can train on a fixed layout and play random (does it generalise?), the reverse, or match them.
 * A **checkpoint scrubber** ("view episode N") replays the greedy rollout captured at intervals during training, so the policy can be watched improving.
 
 **KPI Metrics** (`st.metric` row, for the trained network):
 
 * **Escape rate (last 100 episodes)** — share of recent training episodes that reached the exit.
-* **🔴 Caught** — training episodes ended by the enemy.
+* **🔴 Caught** — training episodes ended by an enemy.
+* **⏱️ Timed out** — training episodes that ran out of steps (a loss), added on user request 2026-07-20. The −100 for a loss shows on the scoreboard and the (scored) returns curve but is **never** in the learning signal — a timeout depends on elapsed steps the network can't see, so penalising it there poisons positions (measured: it *increases* timeouts). Same rule as Rooms 1/3.
 * **Mean steps to exit** — averaged over successful episodes (one step = one metre).
 * **Mean predicted Q** — the network's own late-training value estimate (there is no exact answer to check it against in a continuous room).
 
 **Graphs (full-width analytics row below the board):**
 
-* **Episode return** — per-episode return scatter with a moving-average line.
+* **Episode return (scored)** — per-episode return scatter with a moving-average line; every loss (caught **or** timed out) is floored to −100 in the DISPLAY, mirroring the Play scoreboard (Rooms 2–4 convention). Pure display transform — the learner updates off per-step rewards, never this.
 * **Network training** — TD loss (Huber) and mean predicted Q on a shared dual-axis plot, over gradient steps.
 * **Cumulative outcomes** — running totals of escaped / caught / timed-out.
 * **Exploration rate** — the ε schedule over episodes (Room 2's convention).

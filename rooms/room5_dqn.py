@@ -20,21 +20,24 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from core.chase_arena import (
-    ChaseArena, ARENA, START, EXIT, GOAL_RADIUS, CATCH_RADIUS,
-    PURSUIT, FLANK, DEFAULT_ENEMY_KINDS,
+    ChaseArena, ARENA, START, EXIT, GOAL_HALF, CATCH_RADIUS,
+    PURSUIT, FLANK, AMBUSH,
 )
 from algorithms.deep_q import dqn_control, load_net, q_field, greedy_rollout
 from algorithms.monte_carlo import CONSTANT, DECAYING, epsilon_at, moving_average
 from core.episode import LOSS_SCORE
 
-LEGEND = ("🤖 start (bottom-left) · 🏁 exit (top-right) · 🔴 chaser (hunts you head-on) · "
-          "🟠 flanker (curves in from the side) — both fatal on contact · value field: "
+LEGEND = ("🤖 start · 🏁 exit (1×1 m square) · 🔴 chaser (head-on) · 🟠 flanker (from a "
+          "side) · 🟣 ambusher (sweeps in side-on) — all fatal on contact · value field: "
           "**blue = high**, red = low (RdBu, 0-centred)")
 
-# Per-behaviour colours so the two enemies read as different agents.
-_KIND_MARKER = {PURSUIT: "#e74c3c", FLANK: "#e67e22"}          # red chaser, orange flanker
-_KIND_FILL = {PURSUIT: "rgba(231,76,60,0.28)", FLANK: "rgba(230,126,34,0.28)"}
-_KIND_RING = {PURSUIT: "rgba(231,76,60,0.9)", FLANK: "rgba(230,126,34,0.9)"}
+# Per-behaviour colours so the enemies read as different agents.
+_KIND_MARKER = {PURSUIT: "#e74c3c", FLANK: "#e67e22", AMBUSH: "#9b59b6"}   # red / orange / purple
+_KIND_FILL = {PURSUIT: "rgba(231,76,60,0.28)", FLANK: "rgba(230,126,34,0.28)",
+              AMBUSH: "rgba(155,89,182,0.28)"}
+_KIND_RING = {PURSUIT: "rgba(231,76,60,0.9)", FLANK: "rgba(230,126,34,0.9)",
+              AMBUSH: "rgba(155,89,182,0.9)"}
+_KIND_LABEL = {PURSUIT: "🔴 Chaser", FLANK: "🟠 Flanker", AMBUSH: "🟣 Ambusher"}
 
 _STEP_DELAY = {"Slow": 0.16, "Normal": 0.08, "Fast": 0.03}
 _EVAL_SEED = 4242            # fixed spawn for the scrubber/results, so it is stable
@@ -62,10 +65,10 @@ def _arena_figure(enemies, agent=None, field=None, path=None, dead=False,
             colorbar=dict(title="max Q", thickness=12, len=0.9),
             hoverinfo="skip"))
 
-    # exit disc + catch discs are shapes (true radii in metres), layer above the
+    # exit square + catch discs are shapes (true sizes in metres), layer above the
     # heatmap trace (layer="below" is below TRACES → painted over; see memory).
-    fig.add_shape(type="circle", x0=EXIT[0]-GOAL_RADIUS, y0=EXIT[1]-GOAL_RADIUS,
-                  x1=EXIT[0]+GOAL_RADIUS, y1=EXIT[1]+GOAL_RADIUS,
+    fig.add_shape(type="rect", x0=EXIT[0]-GOAL_HALF, y0=EXIT[1]-GOAL_HALF,
+                  x1=EXIT[0]+GOAL_HALF, y1=EXIT[1]+GOAL_HALF,
                   fillcolor="rgba(38,166,91,0.55)", line=dict(color="white", width=2),
                   layer="above")
     for e, k in zip(enemies, kinds):
@@ -111,25 +114,36 @@ def _arena_figure(enemies, agent=None, field=None, path=None, dead=False,
 # ───────────────────────── controls ─────────────────────────
 def _env_controls():
     st.markdown("##### 🎮 Environment")
-    n_enemies = st.radio("Number of enemies", [1, 2], index=0, horizontal=True,
-        help="1 = a single 🔴 chaser (pure pursuit). 2 adds a 🟠 flanker that curves "
-        "in from the side, and the two repel each other so they pincer you from "
-        "different angles instead of stacking up. Each enemy adds two inputs to the "
-        "network (its position relative to you), so 2 enemies → obs_dim 6.")
+    st.caption("Enemies — toggle each (0–3). Each adds two inputs to the network "
+               "(its position relative to you), and they repel each other so they "
+               "attack from different angles.")
+    t1, t2, t3 = st.columns(3)
+    on_chaser = t1.checkbox("🔴 Chaser", value=True,
+        help="Pure pursuit — heads straight at where you are now. Baitable: arc "
+        "around it and it ends up behind you.")
+    on_flanker = t2.checkbox("🟠 Flanker", value=False,
+        help="Pursues along a path rotated off the direct line, curving in from one "
+        "side rather than trailing behind.")
+    on_ambusher = t3.checkbox("🟣 Ambusher", value=False,
+        help="Sweeps in almost side-on from the opposite side to the flanker — the "
+        "most different path of the three.")
+    kinds = tuple(k for k, on in [(PURSUIT, on_chaser), (FLANK, on_flanker),
+                                  (AMBUSH, on_ambusher)] if on)
+
     speed = st.slider("Enemy speed (× yours)", 0.50, 0.95, 0.75, 0.05,
-        help="How fast each enemy chases, as a fraction of your speed. Measured "
-        "sweet spot (one enemy): at 0.75 a good policy escapes ~95% while ignoring "
-        "the enemy escapes only ~51%. Capped below 1.0 — at equal speed even good "
-        "play escapes ~58%.")
+        help="How fast each enemy chases, as a fraction of your speed. Sweet spot for "
+        "ONE enemy: at 0.75 a good policy escapes ~95% vs ~51% ignoring it. More "
+        "enemies are much harder — drop the speed toward 0.50 when running 3.")
     max_steps = st.select_slider("Max steps per episode", [40, 60, 80, 120], 60,
         help="Metres of travel before an episode times out (one decision = 1 m). "
         "A corner-to-corner run is ~14 steps.")
-    random_enemies = st.checkbox("Randomize enemy positions each episode", value=True,
-        help="You always start in the bottom-left corner. On (default): the enemies "
-        "spawn somewhere new every episode, so the network must learn to read where "
-        "they are and generalise. Off: the enemies sit at a fixed spot, making the "
-        "whole episode deterministic — a warm-up where the net solves one layout.")
-    return dict(enemy_speed=speed, max_steps=max_steps, n_enemies=n_enemies,
+    random_enemies = st.checkbox("Randomize enemy positions each episode (training)",
+        value=True,
+        help="You always start in the bottom-left corner. On (default): enemies spawn "
+        "somewhere new every training episode, so the network must generalise. Off: "
+        "enemies sit at a fixed spot — a deterministic warm-up. (Play has its own "
+        "toggle, so you can train on one and play the other.)")
+    return dict(enemy_speed=speed, max_steps=max_steps, enemy_kinds=kinds,
                 random_enemies=random_enemies)
 
 
@@ -142,9 +156,10 @@ def _algo_row():
     n_episodes = c1.slider("Training episodes", 100, 1500, 800, 50,
         help="Games played while learning. More episodes → more experience, at a "
         "roughly linear time cost (~10–20 s here).")
-    gamma = c2.slider("Discount γ", 0.80, 0.999, 0.99, 0.001,
+    gamma = c2.slider("Discount γ", 0.50, 0.99, 0.99, 0.01,
         help="How much future reward counts. High γ makes reaching the far exit "
-        "worth pursuing through many steps.")
+        "worth pursuing through many steps; low γ (toward 0.50) is short-sighted and "
+        "can fail to value the distant exit at all.")
     lr = c3.select_slider("Adam learning rate", [1e-4, 3e-4, 1e-3, 3e-3], 3e-4,
         format_func=lambda v: f"{v:.0e}",
         help="Optimiser step size. 3e-4 is the stable default; higher rates can "
@@ -205,19 +220,20 @@ def render():
             "learned landscape (blue = high value). Drag the **episode scrubber** to "
             "watch the policy improve, and **▶️ Play** to run a fresh chase. Ignoring "
             "the enemy and beelining escapes only ~half the time; a policy that reads "
-            "the enemy escapes ~95%. Add a **second enemy** — a 🟠 *flanker* that curves "
-            "in from the side while the 🔴 *chaser* comes head-on (they repel each other "
-            "so they attack from different angles) — or untick *Randomize enemy positions* "
-            "for a fixed, deterministic warm-up layout.")
+            "the enemy escapes ~95%. Toggle in a 🟠 *flanker* and 🟣 *ambusher* (up to "
+            "three enemies, each with a different approach; they repel each other so "
+            "they attack from different angles), or untick *Randomize enemy positions* "
+            "for a fixed, deterministic warm-up layout. More enemies are much harder — "
+            "drop the enemy speed when you run three.")
 
     # ── Row 1 — setup board + environment controls ──
     board_col, env_col = st.columns([3, 2])
     with env_col:
         env = _env_controls()
+    kinds = env["enemy_kinds"]
     env_kwargs = dict(enemy_speed=env["enemy_speed"], max_steps=env["max_steps"],
-                      n_enemies=env["n_enemies"], random_enemies=env["random_enemies"])
-    obs_dim = 2 + 2 * env["n_enemies"]
-    kinds = DEFAULT_ENEMY_KINDS[env["n_enemies"]]
+                      enemy_kinds=kinds, random_enemies=env["random_enemies"])
+    obs_dim = 2 + 2 * len(kinds)
     with board_col:
         board = st.empty()
         st.caption(LEGEND)
@@ -233,7 +249,7 @@ def render():
     algo, train = _algo_row()
 
     # ── Train gate ──
-    sig = (env["enemy_speed"], env["max_steps"], env["n_enemies"], env["random_enemies"],
+    sig = (env["enemy_speed"], env["max_steps"], kinds, env["random_enemies"],
            algo["n_episodes"], algo["gamma"], algo["lr"], algo["batch"],
            algo["train_freq"], algo["target_update"], algo["buffer"],
            algo["eps_kind"], algo["eps_params"])
@@ -273,14 +289,20 @@ def render():
     mean_steps = steps_ok.mean() if steps_ok.size else float("nan")
     mean_q = stats["q_pred"][-200:].mean() if stats["q_pred"].size else float("nan")
 
-    k1, k2, k3, k4 = st.columns(4)
+    k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Escape rate (last 100)", f"{escape_rate:.0f}%",
               help="Share of the most recent training episodes that reached the exit.")
     k2.metric("🔴 Caught (training)", f"{int(caught.sum()):,}",
-              help="Training episodes ended by the enemy.")
-    k3.metric("Mean steps to exit", f"{mean_steps:.1f}" if steps_ok.size else "—",
+              help="Training episodes ended by an enemy.")
+    k3.metric("⏱️ Timed out (training)", f"{int(timeout.sum()):,}",
+              help="Training episodes that ran out of steps without escaping — a loss. "
+              "The −100 for a loss is shown on the scoreboard and the returns curve, but "
+              "is deliberately NOT in the learning signal: a timeout depends on elapsed "
+              "steps, which the network can't see, so penalising it there poisons "
+              "positions rather than teaching (measured — it made timeouts worse).")
+    k4.metric("Mean steps to exit", f"{mean_steps:.1f}" if steps_ok.size else "—",
               help="Average metres travelled on successful escapes (1 step = 1 m).")
-    k4.metric("Mean predicted Q", f"{mean_q:.2f}" if stats["q_pred"].size else "—",
+    k5.metric("Mean predicted Q", f"{mean_q:.2f}" if stats["q_pred"].size else "—",
               help="The network's own late-training value estimate (scaled units; "
               "no exact answer exists to check it against in a continuous room).")
 
@@ -307,13 +329,16 @@ def render():
         results_board = st.empty()
         results_caption = st.empty()
     with res_ctrl_col:
-        st.markdown("**▶️ Play** — greedy (ε = 0), fresh random spawn")
+        st.markdown("**▶️ Play** — greedy (ε = 0)")
+        play_random = st.checkbox("Randomize enemy positions", value=True,
+            help="Independent of the training toggle, so you can train on a fixed "
+            "layout and play random (does it generalise?), or train random and play "
+            "the fixed layout, or match them. On: fresh random spawn each press.")
         speed_sel = st.select_slider("Animation speed", ["Slow", "Normal", "Fast"],
             "Normal", help="Playback speed of the animated episode.")
         play = st.button("▶️ Play Episode", type="primary", use_container_width=True,
-            help="Run the viewed policy with exploration off across a fresh chase — the "
-            "enemies spawn somewhere new every press, even if training used the fixed "
-            "layout, so each play is a new test of what it learned.")
+            help="Run the viewed policy with exploration off for one episode — a fresh "
+            "test of what it learned.")
         episode_slot = st.container()
 
     results_caption.caption(
@@ -323,9 +348,8 @@ def render():
 
     # Play is EPHEMERAL — nothing to session state (UI_STRUCTURE).
     if play:
-        # Play ALWAYS throws a fresh random enemy layout at the learned policy, even
-        # when training used the fixed spawn — so every press is a new chase to watch.
-        play_env = ChaseArena(**{**env_kwargs, "random_enemies": True})
+        # Play's enemy randomisation is its own toggle, independent of training's.
+        play_env = ChaseArena(**{**env_kwargs, "random_enemies": play_random})
         pr = greedy_rollout(net, play_env)          # unseeded → new spawn each press
         frames = pr["frames"]
         for k in range(len(frames)):
@@ -376,23 +400,28 @@ def _graphs(stats):
     ep = np.arange(1, len(stats["returns"]) + 1)
     outcome = np.array(stats["outcome"])
 
+    # Scored view: any loss (caught OR timed out) floors to −100 in the DISPLAY,
+    # mirroring the +100 exit and the Play scoreboard (Rooms 2–4 convention). Pure
+    # display transform — the learner updates off per-step rewards, never this.
+    scored = np.where(stats["escaped"], stats["returns"], LOSS_SCORE)
     g1, g2 = st.columns(2)
     with g1:
-        st.markdown("###### Episode return")
+        st.markdown("###### Episode return (scored)")
         colors = np.where(stats["escaped"], "#2ecc71",
                           np.where(stats["caught"], "#e74c3c", "#f39c12"))
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=ep, y=stats["returns"], mode="markers",
+        fig.add_trace(go.Scatter(x=ep, y=scored, mode="markers",
                                  marker=dict(size=4, color=colors, opacity=0.5),
                                  name="episode", hoverinfo="skip"))
-        fig.add_trace(go.Scatter(x=ep, y=moving_average(stats["returns"], 50),
+        fig.add_trace(go.Scatter(x=ep, y=moving_average(scored, 50),
                                  mode="lines", line=dict(color="#2c3e50", width=2),
                                  name="50-ep average"))
         fig.update_layout(height=280, margin=dict(l=0, r=0, t=0, b=0),
-                          xaxis_title="episode", yaxis_title="return")
+                          xaxis_title="episode", yaxis_title="scored return")
         st.plotly_chart(fig, use_container_width=True, key="room5_returns")
-        st.caption("🟢 escaped · 🔴 caught · 🟠 timed out. The average climbs as the "
-                   "policy learns to reach the exit.")
+        st.caption("🟢 escaped · 🔴 caught · 🟠 timed out. Every loss (caught **or** timed "
+                   "out) scores a flat −100, mirroring the +100 exit — a display floor "
+                   "only; the learner never sees it. The average climbs as escapes rise.")
 
     with g2:
         st.markdown("###### Network training")
