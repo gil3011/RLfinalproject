@@ -27,7 +27,7 @@ from algorithms.deep_q import dqn_control, load_net, q_field, greedy_rollout
 from algorithms.monte_carlo import CONSTANT, DECAYING, epsilon_at, moving_average
 from core.episode import LOSS_SCORE
 
-LEGEND = ("🤖 start · 🏁 exit (1×1 m square) · 🔴 chaser (head-on) · 🟠 flanker (from a "
+LEGEND = ("🤖 start · 🏁 exit (1.2 m square) · 🔴 chaser (head-on) · 🟠 flanker (from a "
           "side) · 🟣 ambusher (sweeps in side-on) — all fatal on contact · value field: "
           "**blue = high**, red = low (RdBu, 0-centred)")
 
@@ -57,6 +57,11 @@ def _arena_figure(enemies, agent=None, field=None, path=None, dead=False,
         arr = np.asarray(enemies, dtype=float)
         enemies = [arr] if arr.ndim == 1 else list(arr)
     kinds = list(enemy_kinds) if enemy_kinds is not None else [PURSUIT] * len(enemies)
+
+    # arena floor tint (below the value heatmap, so it shows through when the field
+    # is off) — gives the board a defined surface even before training.
+    fig.add_shape(type="rect", x0=0, y0=0, x1=ARENA, y1=ARENA,
+                  fillcolor="rgba(99,120,160,0.10)", line=dict(width=0), layer="below")
 
     if field is not None:
         xs, ys, Z = field
@@ -102,11 +107,16 @@ def _arena_figure(enemies, agent=None, field=None, path=None, dead=False,
                                              line=dict(color="white", width=1.5)),
                                  hoverinfo="skip", showlegend=False))
 
+    # border frame around the arena (above everything, so it reads over the heatmap)
+    fig.add_shape(type="rect", x0=0, y0=0, x1=ARENA, y1=ARENA,
+                  fillcolor="rgba(0,0,0,0)", line=dict(color="#64748b", width=3),
+                  layer="above")
+
     fig.update_xaxes(range=[0, ARENA], constrain="domain", scaleanchor="y",
                      showgrid=False, zeroline=False, visible=False)
     fig.update_yaxes(range=[0, ARENA], constrain="domain",
                      showgrid=False, zeroline=False, visible=False)
-    fig.update_layout(height=460, margin=dict(l=0, r=0, t=0, b=0),
+    fig.update_layout(height=460, margin=dict(l=2, r=2, t=2, b=2),
                       plot_bgcolor="rgba(0,0,0,0)", showlegend=False)
     return fig
 
@@ -134,7 +144,7 @@ def _env_controls():
         help="How fast each enemy chases, as a fraction of your speed. Sweet spot for "
         "ONE enemy: at 0.75 a good policy escapes ~95% vs ~51% ignoring it. More "
         "enemies are much harder — drop the speed toward 0.50 when running 3.")
-    max_steps = st.select_slider("Max steps per episode", [40, 60, 80, 120], 60,
+    max_steps = st.select_slider("Max steps per episode", [20, 40, 60, 80, 100], 60,
         help="Metres of travel before an episode times out (one decision = 1 m). "
         "A corner-to-corner run is ~14 steps.")
     random_enemies = st.checkbox("Randomize enemy positions each episode (training)",
@@ -355,9 +365,13 @@ def render():
         for k in range(len(frames)):
             dead_here = k == len(frames) - 1 and pr["outcome"] == "caught"
             trail = [(f["agent"][0], f["agent"][1]) for f in frames[: k + 1]]
+            # keep the value field visible during play, recomputed at THIS frame's
+            # enemy positions — so the landscape shifts with the threat as it moves.
+            frame_field = q_field(net, frames[k]["enemies"]) if show_field else None
             results_board.plotly_chart(
                 _arena_figure(frames[k]["enemies"], agent=frames[k]["agent"],
-                              path=trail, dead=dead_here, enemy_kinds=kinds),
+                              path=trail, dead=dead_here, enemy_kinds=kinds,
+                              field=frame_field),
                 use_container_width=True, key=f"room5_play_{k}")
             time.sleep(_STEP_DELAY[speed_sel])
         # Scoreboard: a WIN shows its real return; ANY loss (caught or timed out)

@@ -56,7 +56,7 @@ from gymnasium import spaces
 ARENA = 10.0
 START = np.array([0.5, 0.5], dtype=np.float64)       # 🤖 bottom-left (fixed start)
 EXIT = np.array([9.5, 9.5], dtype=np.float64)        # 🏁 top-right (centre of the goal square)
-GOAL_HALF = 0.5                                      # goal is a 1×1 m square: |x−Eₓ|,|y−E_y| < ½
+GOAL_HALF = 0.6                                      # goal is a 1.2×1.2 m square: |x−Eₓ|,|y−E_y| < GOAL_HALF
 CATCH_RADIUS = 0.5                                   # within this of an enemy ⇒ caught
 STEP = 1.0                                           # agent moves 1 m per decision
 

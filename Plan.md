@@ -489,7 +489,7 @@ shield machinery would tangle the shared class. Instead:
 > now pinned to the specific cure. Room defaults: 800 episodes, decaying ε (1.0→0.05, 0.995),
 > Double DQN on, reward_scale 0.01.
 
-* **Task Description:** Cross an empty continuous 10×10 m room from the bottom-left corner to the top-right exit (a 1×1 m square) while up to three enemies hunt you across the open floor. Touching any enemy ends the episode at −100.
+* **Task Description:** Cross an empty continuous 10×10 m room from the bottom-left corner to the top-right exit (a 1.2×1.2 m square) while up to three enemies hunt you across the open floor. Touching any enemy ends the episode at −100.
 
 > **⚠️ Room 5 drops the ice theme — deliberate user decision.** §1's unifying rule models
 > Rooms 5–6's slipperiness as low friction / inertia. Room 5 now uses **direct movement**
@@ -556,7 +556,7 @@ shield machinery would tangle the shared class. Instead:
 
 * **🎮 Environment** (Row-1 board panel):
   * **Enemy speed (× yours)** — slider `0.50`–`0.95`, default **`0.75`** (MEASURED — peak naive-vs-skilled gap; see the band above). Capped below 1.0 because at equal speed even a good policy escapes only ~58%. Renamed from "Patrol speed" because the enemy now chases rather than sweeps. (No 🎲 Regenerate — geometry is fixed, as in Rooms 3–4. No goal-reward slider.)
-  * **Max steps per episode** — select `{40, 60, 80, 120}`, default **`60`**.
+  * **Max steps per episode** — select `{20, 40, 60, 80, 100}`, default **`60`** (range set 20–100 on user request 2026-07-20).
   * **Enemies — three on/off toggles, 0–3 active** (default just the Chaser), added
     2026-07-20 (user: "add a third enemy with different algorithm, allow the user to turn
     each on or off, 0–3 possible"). Each active enemy adds two inputs (`obs_dim = 2 + 2n`,
@@ -603,9 +603,9 @@ shield machinery would tangle the shared class. Instead:
 
 **Board (continuous arena, not a cell grid):** a square Plotly figure over `x, y ∈ [0, 10]` m (`scaleanchor` + `constrain="domain"` on **both** axes so metres stay square and the arena fills the frame).
 
-* **Static layer:** 🤖 start (bottom-left), 🏁 exit (green **1×1 m square**, top-right — enlarged from a 0.5 m circle on user request 2026-07-20; reached = Chebyshev `|x−Eₓ|,|y−E_y| < ½`), and **0–3 enemies** (🔴 chaser / 🟠 flanker / 🟣 ambusher, each fatal on contact, colour-coded by behaviour) at their current positions. **No walls.** ⚠️ These are Plotly **shapes/markers drawn with `layer="above"`** — `layer="below"` means below *traces*, and the value field is a Heatmap trace, so anything "below" is painted over and vanishes.
+* **Static layer:** 🤖 start (bottom-left), 🏁 exit (green **1.2×1.2 m square**, top-right — enlarged from a 0.5 m circle → `GOAL_HALF = 0.6` on user request 2026-07-20; reached = Chebyshev `|x−Eₓ|,|y−E_y| < GOAL_HALF`), and **0–3 enemies** (🔴 chaser / 🟠 flanker / 🟣 ambusher, each fatal on contact, colour-coded by behaviour) at their current positions. **No walls.** The arena has a **tinted floor** (a `layer="below"` rect, so it shows through when the field is off) and a **border frame** (a `layer="above"` rect). ⚠️ Markers/shapes use `layer="above"` — `layer="below"` means below *traces*, and the value field is a Heatmap trace, so anything "below" is painted over and vanishes.
 * **⭐ Value layer:** the trained network sampled as $\max_a Q(x, y, \cdot)$ on a **50×50 grid** and drawn as an `RdBu` heatmap, `zmid=0` (high value **blue**). This is the room's visual argument for function approximation — a value field that exists *between* the sample points, which no tabular room can show. ⚠️ **The value now depends on the enemy's position** (`obs = [x, y, eₓ−x, e_y−y]`), which a 2-D board cannot show all at once: sample it **holding the enemy at its currently-drawn position** and say so in the caption — the heatmap is a **slice** of a 4-D function, not the whole thing. (The old fixed-guard version dodged this; the chaser makes it explicit, which is fair to show.) Toggled by a **"Show the network's value field"** checkbox.
-* **▶️ Play Episode** animates one greedy rollout, **one metre per frame**, with the enemies drawn at their true per-frame positions (the trajectory records them); the agent marker turns **red** on a catch. Reports the outcome (✅ escaped / 🔴 caught / ⏱️ timed out), step count, and return (a **flat −100 for any loss**, mirroring the +100 exit; the raw is shown in a caption). Play has **its own "Randomize enemy positions" checkbox** (user 2026-07-20), independent of the training one, so you can train on a fixed layout and play random (does it generalise?), the reverse, or match them.
+* **▶️ Play Episode** animates one greedy rollout, **one metre per frame**, with the enemies drawn at their true per-frame positions (the trajectory records them); the agent marker turns **red** on a catch. **The value field stays visible during the animation** (user 2026-07-20), recomputed each frame at the enemies' *current* positions — one cheap batched forward pass — so the landscape shifts with the moving threat. Reports the outcome (✅ escaped / 🔴 caught / ⏱️ timed out), step count, and return (a **flat −100 for any loss**, mirroring the +100 exit; the raw is shown in a caption). Play has **its own "Randomize enemy positions" checkbox** (user 2026-07-20), independent of the training one, so you can train on a fixed layout and play random (does it generalise?), the reverse, or match them.
 * A **checkpoint scrubber** ("view episode N") replays the greedy rollout captured at intervals during training, so the policy can be watched improving.
 
 **KPI Metrics** (`st.metric` row, for the trained network):
