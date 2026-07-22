@@ -629,18 +629,66 @@ shield machinery would tangle the shared class. Instead:
 
 ### Room 6: Advanced DQL (Dynamic Obstacles & Radar Raycasting)
 
-* **Task Description:** Escape a hazardous chamber filled with static and moving obstacles by relying exclusively on forward-facing radar sensors.
-* **State & Action Space:** Continuous state vector $(X, Y, V_x, V_y)$ + $K$ radar distance readings. Discrete acceleration actions.
-* **On-page Controls (with tooltips):**
-* **Perception & Setup:** ⭐ **Agent Radar Range ($X$ meters)** (`1.0` to `10.0` meters), radar ray count $K$ (`4`, `8`, `16`, or `32`), static obstacle count (`2` to `12`), dynamic obstacle speed, ice friction $\mu$. **Goal Reward: +100**.
-* **Neural Network:** Identical network hyperparameters to Room 5 + training episode slider (`500` to `5,000`).
+> **STATUS: DESIGN ONLY — NOT BUILT (planned 2026-07-23 from the user's spec).** No code
+> exists yet; **everything below is design intent and acceptance criteria, nothing is
+> measured.** The room is a deliberate step up from Room 5: it re-adds ice **momentum**
+> (dropped in Room 5), replaces full enemy positions with **partial observation** (forward
+> radar only), and makes **generalisation** — not just escape rate — the headline. It carries
+> Room 5's hard-won, *measured* safeguards forward (Double DQN + reward-scaling + dense
+> shaping; strict Markov discipline; scoreboard-not-learning penalties; per-second friction;
+> measure-the-ceiling-before-you-tune; report ≥3 seeds because these rooms are bimodal). The
+> **build order and open decisions are at the end** — the env core and scripted baseline come
+> first, before any network, exactly as Room 5's baseline-band de-risked its design.
 
+* **Task Description:** Escape a hazardous chamber to the exit, steering around obstacles you can only perceive through a fixed array of **forward radar rays** — not by knowing every obstacle's coordinates.
+* **State & Action Space:** Continuous. Observation = **self-dynamics** `[x, y, vₓ, v_y]` **+ K radar readings** (nearest-obstacle distance per ray), all normalised (below) → `obs_dim = 4 + K` for static obstacles (more with the moving-obstacle channel, below). **9 discrete acceleration actions** (the 8 compass thrusts + coast), reusing Room 5's fixed index order — but here an action sets **acceleration**, not displacement, so momentum carries between steps.
+* **Geometry / winnability:** fixed **start** and **exit** (a goal square, as Room 5), obstacles in between. The layout is *not* fixed — it is regenerated every episode (below). The physics must be **measured winnable** before any net trains (see §2 Time-Based Physics).
 
-* **KPI Metrics:** Obstacle collision rate per episode, **Generalization Score** (success rate on unseen rooms), average near-miss braking distance.
-* **Visualizations & Interactive Features:**
-* **Live Radar Visualization:** Animate the agent with $K$ transparent ray lines that turn **red** the instant an obstacle enters the $X$-meter detection threshold.
-* Trajectory heatmap aggregating the paths of the last 50 episodes to show policy stabilization.
-* 🎲 **"Generate Random Room" Button:** Instantly clears and generates a novel obstacle layout to test if the neural network learned generalized collision avoidance rather than room memorization.
+**1. Core Environment (engineering) — acceptance criteria**
+
+* **Obstacle size — strictly 0.5 m.** Every obstacle has a **0.5 m width** (design decision to lock: **circular, radius 0.25 m** is cleanest for ray/collision math; a 0.5 m square is the alternative — pick one and keep *all* obstacles that size). A single `OBSTACLE_RADIUS = 0.25` (or `OBSTACLE_SIZE = 0.5`) constant, referenced everywhere, is the acceptance test.
+* **Dynamic, randomised layouts — fresh every episode.** Obstacle **count and positions are episode parameters, re-sampled on every `reset()`**, never fixed — this is the anti-memorisation guarantee and the reason the radar inputs must be *used*, exactly as Room 5's per-episode enemy respawn forced the net to read the enemy channel rather than memorise a path. The generator must (a) keep obstacles off the start and exit, (b) keep a start→exit corridor **provably traversable** (reachability check on the free space, mirroring `generate_layout`/`generate_portals`' "place one at a time, keep only if still solvable" guard), and (c) keep obstacles from overlapping. Count is a slider (`2`–`12`); a **fixed-seed toggle** (as Room 5's *Randomize enemy positions*) lets the user pin one layout for a deterministic warm-up.
+* **Observation space — self-dynamics + forward vision, center-to-center, X configurable.**
+  * **Self-dynamics:** the agent's `[x, y, vₓ, v_y]`. Velocity is back in the state because momentum is back — omitting it would be the same silent non-Markov bug Room 3's shield and Room 5's timeout warned about.
+  * **Radar (forward vision):** `K` rays (`4/8/16/32`) fanned around the agent; each ray reports the distance to the **nearest obstacle within range `X`**, else `X` (max = "clear"). ⚠️ **Distance is measured CENTER-TO-CENTER** — agent centre to obstacle centre — per the user's spec, *not* ray-to-surface. Document this explicitly in the env docstring and a UI caption, and note the honest consequence: the usable clearance is `center_distance − OBSTACLE_RADIUS − AGENT_RADIUS`, so "detected at X" is not "collides at X". `X` (**Agent Radar Range**, `1.0`–`10.0` m) is a single configurable constant/param threaded into both the observation and the live-ray visualisation — one source of truth.
+* **Post-training generalisation test — the "Random Room Generator".** A 🎲 **Generate Random Room** control runs a dedicated **evaluation routine** that rolls out the *frozen trained policy* on **N freshly generated layouts the training never saw** (held-out seeds), and reports a clean **Generalisation Score** = escape rate on those unseen rooms. It must be honest: training draws from one seed stream, evaluation from a disjoint one, so a high score means learned avoidance, not memorisation. (This is the room's whole thesis, and it is only meaningful because training already randomises layouts per §1.)
+
+**2. Learning Mechanics & Physics — Room 5 safeguards (each an acceptance criterion)**
+
+* **Normalisation & the Markov property.**
+  * **Normalise every radar distance to ~`[0, 1]`** by dividing by `X` (and clamp), and normalise `[x, y]` by arena size and `[vₓ, v_y]` by a velocity cap — Room 5 measured that normalised inputs were part of what kept training stable.
+  * ⚠️ **Moving obstacles are non-Markov on a single frame — do NOT train on a one-frame snapshot.** A lone radar sweep gives distance but not whether an obstacle is *approaching or receding*; the value function then chases a self-contradicting target, the exact failure that killed lead-pursuit and the timeout penalty in Room 5. **If dynamic obstacles are enabled**, the observation MUST carry motion: either **frame-stacking** (append the previous 1–2 sweeps, obs grows to `4 + K·(stack)`) **or a per-ray range-rate channel** (`Δdistance` since last step, obs `4 + 2K`). Range-rate is the leaner, preferred option. **Static-only mode stays single-frame** (it is Markov) and should be the **default first build**; moving obstacles are an opt-in that *switches the observation on*.
+* **Preserve Room 5's learning recipe — do not regress to vanilla DQN or sparse reward.** Reuse `algorithms/deep_q.py` **unchanged**: **Double DQN** (measured: a single-net DQN diverged to a state-blind collapse, 0–35 % escape, bimodal), **reward-scaling to ±1** for the network (env keeps ±100 for the scoreboard), and a **dense potential-based shaping** term toward the exit (measured in Room 5: sparse reward simply does not learn here, and weak shaping is worse than none). "Identical network hyperparameters to Room 5" means these three, not just the MLP shape.
+* **⚠️ The wall-penalty bug — the safeguard that matters most here.** Room 5's *earlier maze build* was silently destroyed by geodesic (BFS) shaping that gave obstacle/wall cells a huge "unreachable" constant: an agent legally hugging an obstacle sampled that cell and took a **−66 spike every step**, and the maze degraded 7 %→0 % while an open arena trained to 98 %. Room 6 has obstacles in the shaping field, so it is the room most exposed to this. The shaping field MUST be **soft or dilated inward** — obstacle cells inherit their free neighbours' geodesic distance (verified smooth, max Δ ≈ grid step) — so no massive negative spike ever fires near an obstacle. Acceptance test: sample the shaping potential on a dense grid and assert the per-step shaping reward is bounded (no outliers). *(Simpler alternative worth considering: skip the geodesic field entirely and shape on straight-line distance-to-exit as Room 5 does — obstacles then affect only collisions, not the potential. Decide during the baseline step.)*
+* **Time-based physics — per-second friction, and a *measured-winnable* thrust.** Momentum returns: `v ← μ^dt·(v + a·dt)`, `pos ← pos + v·dt`. ⚠️ **Friction `μ` is per-SECOND, not per-step** — Room 5's old build measured that a per-step μ turned μ=0.8 into a tar pit (thousands of steps to cross). Pick a small `dt` (Room 5 used 0.05). ⚠️ **The agent's thrust must beat the physical resistance** — Room 5 shipped a sketch with thrust < disturbance that was literally unwinnable. **Before training, validate the room is physically solvable** (a hand/scripted controller reaches the exit) and record the numbers, exactly as §3 requires.
+* **Scoreboard vs learning signal — keep them separate (the app-wide rule).** A **collision** and a **timeout** both **end the episode** and are counted on the KPIs / scoreboard (a flat −100 for any loss, mirroring the +100 exit, as Rooms 2–5). But that −100 must **never** enter the cumulative per-step shaping reward the learner trains on: a timeout depends on elapsed steps the network cannot see, and penalising it there poisons positions (measured in Rooms 3 and 5 — it *increased* timeouts). The **collision** is a real terminal reward the environment pays on the transition (that one is legitimate learning signal); the **timeout** stays display-only.
+
+**3. Scripted Baseline Ceiling (do this FIRST, before the network)**
+
+* Write a quick **reactive scripted controller** — steer away from the nearest ray hit within `X`, bias thrust toward the exit — and run it across **≥3 random seeds × many layouts**, reporting **success rate and variance**. This establishes the realistic **performance ceiling** for Room 6 and tells us whether a later low DQN score is a training problem or a genuinely hard/unwinnable room — the single most useful measurement, exactly as Room 5's naive-vs-skilled band (51 % vs 95 %) was. It also doubles as the **physics-winnability check** in §2. Expect variance to be large and layout-dependent; do not tune anything off one seed.
+
+**On-page controls (with tooltips), mirroring Room 5's dashboard:**
+* **🎮 Perception & Setup:** ⭐ **Agent Radar Range `X`** (`1.0`–`10.0` m), **radar rays `K`** (`4/8/16/32`), **obstacle count** (`2`–`12`), **dynamic-obstacle speed** (0 = static, the default), **ice friction μ**, **Randomize layout each episode** toggle, 🎲 **Regenerate**. Goal reward fixed **+100** (no slider, as Room 5).
+* **🧠 Deep Q-Network:** the **same controls and defaults as Room 5** (Double DQN on, reward-scale, decaying ε, etc.) plus a **training-episodes** slider `500`–`5,000` (a larger, partially-observed input needs more episodes — Room 5 already showed obs-dim and difficulty push the episode budget up).
+
+**KPI Metrics:** Escape rate (last 100) · **Collision rate per episode** · ⏱️ Timed out · **Generalisation Score** (escape rate on unseen layouts — the headline) · Mean predicted Q. *(Rejected until measured: "average near-miss braking distance" from the sketch — Room 5's lesson is that a metric earns its place only after a probe shows it means something; keep it as a candidate, not a shipped tile.)*
+
+**Visualisations:**
+* **Live radar** — the `K` rays drawn from the agent, each turning **red** the instant an obstacle enters range `X` (all `layer="above"`, per Room 5's "below is below traces, the heatmap paints over it" bug).
+* **Trajectory heatmap** — the last ~50 rollout paths aggregated, showing the policy stabilising.
+* 🎲 **Generate Random Room** — see §1's generalisation routine; one click evaluates the frozen policy on a novel layout and updates the Generalisation Score.
+* **No global value-field heatmap** (unlike Room 5): the state is not just `(x, y)` — value depends on the radar readings, i.e. the obstacle layout — so a 2-D `max_a Q(x, y)` slice would be misleading. The radar + trajectory views are the honest visuals for a partially-observed room.
+
+**Anticipated shared-code changes (to confirm at build time):**
+* A **new `core/radar_arena.py`** env (a `gymnasium.Env`, like `ChaseArena`) — *not* an extension of `ChaseArena`, whose obs is enemy-relative positions, not rays. Reuse Room 5's normalised-obs / swept-collision / spawn-guard patterns and the `code examples/dql` API.
+* `algorithms/deep_q.py` reused **unchanged** (the whole point of the recipe carrying over). A `rooms/room6_radar.py` `render()` following `docs/UI_STRUCTURE.md`; wire into `streamlit_app.py`; verify headlessly with `AppTest` (the browser screenshot tools time out on Streamlit+Plotly).
+
+**Build order (de-risk before committing to the full room):**
+1. `radar_arena` core: obstacle generator (0.5 m, randomised, solvable), **center-to-center radar**, momentum physics — with **measured-winnable** constants.
+2. **Scripted baseline ceiling** (§3), ≥3 seeds — decide static-first, and whether to use a dilated geodesic field or straight-line shaping, from the numbers.
+3. Wire **Double-DQN** training (reused), measure escape + Generalisation Score, static obstacles first.
+4. Add **moving obstacles** *with* the range-rate/frame-stack channel; re-measure.
+5. `room6_radar.py` UI (radar viz, trajectory heatmap, Generate-Random-Room), AppTest, then commit on a `room-6` branch.
 
 
 
