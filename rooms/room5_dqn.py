@@ -21,23 +21,31 @@ import streamlit as st
 
 from core.chase_arena import (
     ChaseArena, ARENA, START, EXIT, GOAL_RADIUS, CATCH_RADIUS,
+    PURSUIT, FLANK, DEFAULT_ENEMY_KINDS,
 )
 from algorithms.deep_q import dqn_control, load_net, q_field, greedy_rollout
 from algorithms.monte_carlo import CONSTANT, DECAYING, epsilon_at, moving_average
 from core.episode import LOSS_SCORE
 
-LEGEND = ("🤖 start (bottom-left) · 🏁 exit (top-right) · 🔴 enemy (fatal on "
-          "contact) · value field: **blue = high**, red = low (RdBu, 0-centred)")
+LEGEND = ("🤖 start (bottom-left) · 🏁 exit (top-right) · 🔴 chaser (hunts you head-on) · "
+          "🟠 flanker (curves in from the side) — both fatal on contact · value field: "
+          "**blue = high**, red = low (RdBu, 0-centred)")
+
+# Per-behaviour colours so the two enemies read as different agents.
+_KIND_MARKER = {PURSUIT: "#e74c3c", FLANK: "#e67e22"}          # red chaser, orange flanker
+_KIND_FILL = {PURSUIT: "rgba(231,76,60,0.28)", FLANK: "rgba(230,126,34,0.28)"}
+_KIND_RING = {PURSUIT: "rgba(231,76,60,0.9)", FLANK: "rgba(230,126,34,0.9)"}
 
 _STEP_DELAY = {"Slow": 0.16, "Normal": 0.08, "Fast": 0.03}
 _EVAL_SEED = 4242            # fixed spawn for the scrubber/results, so it is stable
 
 
 # ───────────────────────── board figure ─────────────────────────
-def _arena_figure(enemies, agent=None, field=None, path=None, dead=False):
+def _arena_figure(enemies, agent=None, field=None, path=None, dead=False,
+                  enemy_kinds=None):
     """Plotly figure of the arena. `enemies` is a single (x, y) or an (n, 2) array;
-    `field` is an optional (xs, ys, Z) value slice drawn as an RdBu heatmap
-    underneath."""
+    `enemy_kinds` colours each by behaviour; `field` is an optional (xs, ys, Z)
+    value slice drawn as an RdBu heatmap underneath."""
     fig = go.Figure()
 
     if enemies is None:
@@ -45,6 +53,7 @@ def _arena_figure(enemies, agent=None, field=None, path=None, dead=False):
     else:
         arr = np.asarray(enemies, dtype=float)
         enemies = [arr] if arr.ndim == 1 else list(arr)
+    kinds = list(enemy_kinds) if enemy_kinds is not None else [PURSUIT] * len(enemies)
 
     if field is not None:
         xs, ys, Z = field
@@ -59,10 +68,10 @@ def _arena_figure(enemies, agent=None, field=None, path=None, dead=False):
                   x1=EXIT[0]+GOAL_RADIUS, y1=EXIT[1]+GOAL_RADIUS,
                   fillcolor="rgba(38,166,91,0.55)", line=dict(color="white", width=2),
                   layer="above")
-    for e in enemies:
+    for e, k in zip(enemies, kinds):
         fig.add_shape(type="circle", x0=e[0]-CATCH_RADIUS, y0=e[1]-CATCH_RADIUS,
                       x1=e[0]+CATCH_RADIUS, y1=e[1]+CATCH_RADIUS,
-                      fillcolor="rgba(231,76,60,0.30)", line=dict(color="rgba(231,76,60,0.9)", width=1),
+                      fillcolor=_KIND_FILL[k], line=dict(color=_KIND_RING[k], width=1),
                       layer="above")
 
     if path is not None and len(path) > 1:
@@ -78,9 +87,9 @@ def _arena_figure(enemies, agent=None, field=None, path=None, dead=False):
                              hoverinfo="skip", showlegend=False))
     fig.add_trace(go.Scatter(x=[EXIT[0]], y=[EXIT[1]], mode="text", text=["🏁"],
                              textfont=dict(size=20), hoverinfo="skip", showlegend=False))
-    for e in enemies:
+    for e, k in zip(enemies, kinds):
         fig.add_trace(go.Scatter(x=[e[0]], y=[e[1]], mode="markers",
-                                 marker=dict(size=15, color="#e74c3c",
+                                 marker=dict(size=15, color=_KIND_MARKER[k],
                                              line=dict(color="white", width=1.5)),
                                  hoverinfo="skip", showlegend=False))
     if agent is not None:
@@ -103,9 +112,10 @@ def _arena_figure(enemies, agent=None, field=None, path=None, dead=False):
 def _env_controls():
     st.markdown("##### 🎮 Environment")
     n_enemies = st.radio("Number of enemies", [1, 2], index=0, horizontal=True,
-        help="How many enemies chase you. Each adds two inputs to the network "
-        "(its position relative to you), so 2 enemies → obs_dim 6. Two hunters are "
-        "much harder to shake.")
+        help="1 = a single 🔴 chaser (pure pursuit). 2 adds a 🟠 flanker that curves "
+        "in from the side, and the two repel each other so they pincer you from "
+        "different angles instead of stacking up. Each enemy adds two inputs to the "
+        "network (its position relative to you), so 2 enemies → obs_dim 6.")
     speed = st.slider("Enemy speed (× yours)", 0.50, 0.95, 0.75, 0.05,
         help="How fast each enemy chases, as a fraction of your speed. Measured "
         "sweet spot (one enemy): at 0.75 a good policy escapes ~95% while ignoring "
@@ -195,9 +205,10 @@ def render():
             "learned landscape (blue = high value). Drag the **episode scrubber** to "
             "watch the policy improve, and **▶️ Play** to run a fresh chase. Ignoring "
             "the enemy and beelining escapes only ~half the time; a policy that reads "
-            "the enemy escapes ~95%. Add a **second enemy** (each one adds two inputs to "
-            "the net), or untick *Randomize enemy positions* for a fixed, deterministic "
-            "warm-up layout.")
+            "the enemy escapes ~95%. Add a **second enemy** — a 🟠 *flanker* that curves "
+            "in from the side while the 🔴 *chaser* comes head-on (they repel each other "
+            "so they attack from different angles) — or untick *Randomize enemy positions* "
+            "for a fixed, deterministic warm-up layout.")
 
     # ── Row 1 — setup board + environment controls ──
     board_col, env_col = st.columns([3, 2])
@@ -206,13 +217,15 @@ def render():
     env_kwargs = dict(enemy_speed=env["enemy_speed"], max_steps=env["max_steps"],
                       n_enemies=env["n_enemies"], random_enemies=env["random_enemies"])
     obs_dim = 2 + 2 * env["n_enemies"]
+    kinds = DEFAULT_ENEMY_KINDS[env["n_enemies"]]
     with board_col:
         board = st.empty()
         st.caption(LEGEND)
         # preview: a representative spawn (fixed, no training yet)
         prev_env = ChaseArena(**env_kwargs)
         _, prev_info = prev_env.reset(seed=_EVAL_SEED)
-        board.plotly_chart(_arena_figure(prev_info["enemies"], agent=prev_info["agent"]),
+        board.plotly_chart(_arena_figure(prev_info["enemies"], agent=prev_info["agent"],
+                                         enemy_kinds=kinds),
                            use_container_width=True, key="room5_preview")
 
     # ── Row 2 — algorithm ──
@@ -320,7 +333,7 @@ def render():
             trail = [(f["agent"][0], f["agent"][1]) for f in frames[: k + 1]]
             results_board.plotly_chart(
                 _arena_figure(frames[k]["enemies"], agent=frames[k]["agent"],
-                              path=trail, dead=dead_here),
+                              path=trail, dead=dead_here, enemy_kinds=kinds),
                 use_container_width=True, key=f"room5_play_{k}")
             time.sleep(_STEP_DELAY[speed_sel])
         # Scoreboard: a WIN shows its real return; ANY loss (caught or timed out)
@@ -350,7 +363,8 @@ def render():
     else:
         trail = [(f["agent"][0], f["agent"][1]) for f in roll["frames"]]
         results_board.plotly_chart(
-            _arena_figure(spawn["enemies"], agent=spawn["agent"], field=field, path=trail),
+            _arena_figure(spawn["enemies"], agent=spawn["agent"], field=field, path=trail,
+                          enemy_kinds=kinds),
             use_container_width=True, key="room5_results")
 
     # ── Graphs ──

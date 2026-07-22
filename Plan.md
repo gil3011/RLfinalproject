@@ -558,9 +558,18 @@ shield machinery would tangle the shared class. Instead:
   * **Enemy speed (× yours)** — slider `0.50`–`0.95`, default **`0.75`** (MEASURED — peak naive-vs-skilled gap; see the band above). Capped below 1.0 because at equal speed even a good policy escapes only ~58%. Renamed from "Patrol speed" because the enemy now chases rather than sweeps. (No 🎲 Regenerate — geometry is fixed, as in Rooms 3–4. No goal-reward slider.)
   * **Max steps per episode** — select `{40, 60, 80, 120}`, default **`60`**.
   * **Number of enemies** — 1 or 2 (default **1**), added 2026-07-20 (user). A second
-    chaser adds two inputs to the network (its relative position → `obs_dim` 6) and is
-    much harder to shake — this is Room 5's cheap echo of Room 4's "each coin doubles the
-    tabular table" pain: here another enemy is **two more floats**, not a state explosion.
+    enemy adds two inputs to the network (its relative position → `obs_dim` 6) — Room 5's
+    cheap echo of Room 4's "each coin doubles the tabular table": here another enemy is
+    **two more floats**, not a state explosion. **The two enemies use different behaviours
+    so they don't move as one** (user, 2026-07-20 — "make them move differently"): a
+    🔴 **Chaser** (pure pursuit, head-on) and a 🟠 **Flanker** (pursuit along a heading
+    rotated 45° off the direct line, curving in from the side), plus **mutual repulsion**
+    so they split to opposite sides instead of stacking on the same pursuit curve. All
+    three effects are functions of *observed* positions only, so the env stays Markov —
+    unlike lead pursuit (needs the agent's velocity, not in the obs) or an exit-guarding
+    interceptor (measured: camps the one cell the agent must reach → escape ~1–7%,
+    unwinnable, rejected). Measured (0.75, 800 ep, 3 seeds): **escape 93% (sd 5)**, mean
+    enemy-gap 3.1 m (vs 2.5 m for two identical pursuers).
   * **Randomize enemy positions each episode** — checkbox (default **on**), added 2026-07-20
     (user; revised same day from an agent-start toggle to an *enemy* toggle — "agent starts at
     the same point but the enemies at random locations when checked"). The **agent always
