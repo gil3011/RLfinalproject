@@ -1,61 +1,3 @@
-"""
-Room 2 — Monte Carlo control (on-policy first-visit, epsilon-greedy).
-
-Task: cross long icy corridors and avoid portal traps that teleport you back to
-the start.
-
-Board cell types (see the legend under the board):
-  * 🧱 blocked — walls the agent cannot step into; they carve the corridors,
-  * 🟦 slippery ice — moves may slip perpendicular (placed by count, as in Room 1),
-  * 🌀 portal trap — landing on one teleports the agent back to the start.
-
-Ice is placed by count exactly as in Room 1, so the two rooms differ in what the
-agent KNOWS, not in the physics — the comparison the rooms exist to make.
-
-There are deliberately NO 🟥 negative-reward cells here, though Room 1 has them.
-They were tried and removed: they break MC control outright. Bumping a wall returns
-0 and leaves the agent in place, so once penalty cells push early sampled returns
-negative, argmax Q picks "bump" — and that choice then manufactures its own
-evidence, since every later episode is a full cap of bumping, confirming Q(bump)=0.
-Measured at Room 2's defaults: 0% success and a pure loitering policy, even though
-the random walk found the exit in 7% of episodes and V* was 14.4. Not fixable by a
-step cost or by optimistic initial values (both still 0%). Room 1's DP is immune —
-it backs up through the true model instead of sampled returns — which is why 🟥
-cells live there and not here. Do not "restore" them without solving that.
-
-Portals carry NO reward penalty: being sent back to the start simply delays the
-exit, and the discount γ is what makes that expensive. That is why γ is a control
-here rather than a constant — at γ = 1 a portal would cost nothing at all.
-
-Unlike Room 1, this room has NO step cost, and a lost ▶️ Play episode is instead
-scored a flat -100 by the shared `scored_return` so that giving up always ranks
-last on the scoreboard. The split is deliberate: Room 1's agent is DP and never
-sees a return at all — only the model moves it — so a penalty on the reported G
-would be pure decoration there and a step cost is the only thing that can change
-its behaviour. Here the penalty is exactly what it claims to be: a score.
-
-Page flow follows docs/UI_STRUCTURE.md:
-  Row 1 — About + setup board + 🎮 Environment controls.
-  Row 2 — 🧠 Algorithm parameters + 🚀 Train.
-  Row 3 — Training results: KPIs, an episode-checkpoint scrubber, the results
-          board + ▶️ Play (the plan's "test mode", ε = 0), the learning curves,
-          and a DP-benchmark row comparing V_MC against the exact V*.
-
-The DP benchmark is displayed only — the learner never sees it. It exists because
-Room 1 already computes the exact answer for this very board, which makes "MC
-samples what DP computes" visible instead of theoretical.
-
-On the two value numbers this room shows:
-  * V_MC(s) = max_a Q(s,a) is MC's estimate OF ITSELF, and it understates the
-    policy badly — measured at ~7.6 when the learned policy was really worth
-    ~12.4 out of an optimal 14.8. Two effects compound: Q is the value of the
-    epsilon-greedy agent (which keeps moving randomly), and the reference's 1/N
-    step size makes Q a plain lifetime average that never forgets the early
-    random-walk episodes.
-  * So the KPI reports the policy's TRUE value via `policy_value()` — an exact
-    model-side evaluation of the very policy ▶️ Play runs. V_MC still appears, in
-    the benchmark row, next to the explanation of why the two disagree.
-"""
 from __future__ import annotations
 
 import time
@@ -75,15 +17,14 @@ GOAL = (0, 9)
 
 _ARROW = {"U": "↑", "D": "↓", "L": "←", "R": "→"}
 _STEP_DELAY = {"Slow": 0.45, "Normal": 0.22, "Fast": 0.08}
-_LEGEND = ("🤖 start · 🏁 goal · 🧱 wall · 🟦 slippery ice · "
-           "🌀 portal trap (sends you back to the start)")
+_LEGEND = ("🤖 Start · 🏁 Goal · 🧱 Wall · 🟦 Ice (slippery) · "
+           "🌀 Portal (teleport to start)")
 _MA_WINDOW = 50
 
 
 def _make_grid(blocked, ice, portals, slip, goal_reward=100.0, seed=None):
-    # seed=None → fresh entropy, so ▶️ Play Episode slips differently each run
-    # (the point of watching a stochastic rollout). Training passes an explicit
-    # seed for reproducible curves; the DP grids don't touch rng at all.
+    # seed=None → fresh entropy, so ▶️ Play Episode slips differently each run.
+    # Training passes an explicit seed for reproducible curves.
     return IcyGridWorld(
         start=START, goal=GOAL, blocked=blocked, ice=ice, slip=slip,
         goal_reward=goal_reward, teleports={p: START for p in portals},
@@ -115,20 +56,13 @@ def _dp_optimal(blocked_t, ice_t, portals_t, slip, goal_reward, gamma):
 @st.cache_data(show_spinner=False)
 def _learned_policy_value(blocked_t, ice_t, portals_t, slip, goal_reward, gamma,
                           policy_t):
-    """Exact value of a LEARNED policy — how good it actually is.
-
-    MC's own max_a Q understates the greedy policy it plays (see the benchmark
-    row), so the only honest answer comes from evaluating the policy against the
-    true model. Displayed only; the learner never sees it.
-    """
+    """Exact value of a LEARNED policy — how good it actually is."""
     grid = _make_grid(set(blocked_t), set(ice_t), set(portals_t), slip, goal_reward)
     return policy_value(grid, dict(policy_t), gamma)
 
 
 def _regenerate_layout(env, seed, version):
     blocked, ice, _ = generate_layout(env["n_blocked"], env["n_slippery"], 0, seed)
-    # Portals come from an independent pool, so keep them off the ice — a cell
-    # drawn as two hazards at once just looks broken.
     portals = generate_portals(blocked, env["n_portals"], seed, exclude=ice)
     st.session_state["room2_layout"] = {
         "blocked": blocked, "ice": ice, "portals": portals, "version": version,
@@ -169,15 +103,9 @@ def _base_grid(grid, V, policy, show_arrows):
                 z[i, j] = np.nan
                 text[i, j] = "🧱"
             elif grid.is_teleport(s):
-                # Transient — never occupied, so it has no value to show.
                 z[i, j] = np.nan
                 text[i, j] = "🌀"
             elif s == GOAL:
-                # Masked, like the walls. The exit is TERMINAL — you never act
-                # from it — so V(exit) is 0, not the +100 it pays on entry.
-                # Painting the reward here put a number on a scale labelled V(s)
-                # that was not a V at all: every other cell showed the expected
-                # return from standing there, and this one showed a reward.
                 z[i, j] = np.nan
                 text[i, j] = "🏁"
             elif s == START:
@@ -263,7 +191,6 @@ def _steps_curve(steps, success, view_ep):
 
 
 def _epsilon_curve(eps, view_ep):
-    """Exploration rate per episode — the ε that was actually in force."""
     fig = go.Figure(go.Scatter(
         x=np.arange(1, len(eps) + 1), y=eps, mode="lines",
         line={"color": "#7c3aed", "width": 2}, name="ε"))
@@ -282,27 +209,17 @@ def _epsilon_curve(eps, view_ep):
 def _env_controls():
     st.markdown("##### 🎮 Environment & Physics")
     n_blocked = st.slider("Blocked cells 🧱", 0, 30, 20,
-        help="Walls the agent cannot step into — these carve the icy corridors. "
-        "Placement always keeps a path from the start to the exit.")
+        help="Impassable walls that form corridors. A valid path to the exit is always preserved.")
     n_slippery = st.slider("Slippery cells 🟦", 0, 40, 20,
-        help="Icy cells (shaded blue) where a move may slip perpendicular. Same "
-        "hazard as Room 1 — but here the agent has to discover it by slipping, "
-        "rather than reading it off the model.")
+        help="Ice cells where movement may slide sideways.")
     slip = st.slider("Slip probability", 0.0, 0.8, 0.2, 0.05,
-        help="On an ice cell, the chance a move sends you perpendicular instead "
-        "of straight ahead. No effect on solid ground.")
+        help="Chance of sliding perpendicular to the intended direction on ice.")
     n_portals = st.slider("Portal traps 🌀", 0, 5, 3,
-        help="Landing on a portal teleports you straight back to the start. There "
-        "is no reward penalty — the punishment is the time you lose, which only "
-        "costs you when γ < 1. Portals are never placed where they would strand "
-        "the exit.")
+        help="Traps that teleport the agent back to the start. No point penalty, but costs time (discounted by γ).")
     goal_reward = st.slider("Goal reward 🏁", 10, 1000, 100, 10,
-        help="Reward for reaching the exit — the only reward on the board. Monte "
-        "Carlo only ever sees it by actually getting there, so everything it "
-        "learns is scaled by this number.")
+        help="Reward for reaching the exit. All learned values scale relative to this number.")
     regen = st.button("🎲 Regenerate layout", use_container_width=True,
-        help="Apply the current counts and reshuffle the walls, ice, and portals. "
-        "The board only changes when you click this.")
+        help="Generate a new layout with the selected cell counts.")
     return {"slip": slip, "n_blocked": n_blocked, "n_slippery": n_slippery,
             "n_portals": n_portals, "goal_reward": goal_reward, "regen": regen}
 
@@ -311,53 +228,34 @@ def _algo_row():
     st.markdown("##### 🧠 Algorithm")
     c1, c2, c3 = st.columns(3)
     gamma = c1.slider("Discount factor γ", 0.50, 0.99, 0.90, 0.01,
-        help="How much future reward is worth vs. immediate. This is what makes "
-        "portals hurt: the only reward is +100 at the exit, so a trap costs you "
-        "only through the extra discounting of a longer route. At γ = 1 a portal "
-        "would be free.")
+        help="Higher values value future rewards more. This determines how much portals 'hurt' by delaying the goal.")
     episodes = c2.select_slider("Training episodes",
         [100, 250, 500, 1000, 2000, 3000, 5000], value=2000,
-        help="How many complete episodes MC samples. Monte Carlo learns only from "
-        "FINISHED episodes, so too few and the agent never stumbles onto the exit "
-        "at all — the values stay flat at zero.")
+        help="Number of complete episodes sampled. Too few episodes prevent the agent from ever finding the exit.")
     max_steps = c3.select_slider("Max steps per training episode",
         [50, 100, 200, 300, 400, 500], value=300,
-        help="Cap on each TRAINING episode. Early on the policy is a random walk, "
-        "so this must be generous enough to reach the exit by luck — otherwise no "
-        "episode ever returns a reward and nothing is learned.")
+        help="Step cap per episode. Must be generous enough early on for random walks to find the exit.")
 
     e1, e2 = st.columns([1, 3])
     eps_kind = e1.selectbox("Exploration", [DECAYING, CONSTANT],
-        help="ε is the chance of ignoring the current best action and trying a "
-        "random one. Constant ε keeps exploring forever (and keeps paying for it); "
-        "decaying ε explores early, then commits.")
+        help="Decaying explores early then commits; Constant maintains a fixed chance of random moves forever.")
     with e2:
         if eps_kind == CONSTANT:
             eps = st.slider("ε", 0.01, 0.5, 0.30, 0.01,
-                help="Fixed exploration rate — the chance of ignoring the policy "
-                "and moving at random. Too LOW is the real danger: below ~0.2 the "
-                "agent mostly follows its own arbitrary starting policy, almost "
-                "never stumbles on the exit, and so learns nothing at all (every "
-                "return stays 0 and Q stays flat). Around 0.3 it reliably finds "
-                "the exit and matches decaying ε.")
+                help="Fixed chance of taking a random move instead of the best action. Values below ~0.2 struggle to find the exit.")
             eps_params = (eps,)
         else:
             d1, d2, d3 = st.columns(3)
             eps_start = d1.slider("ε start", 0.1, 1.0, 1.0, 0.05,
-                help="Exploration rate at episode 1. Start at 1.0 for a pure "
-                "random walk — with an all-zero Q there is nothing to exploit yet.")
+                help="Exploration rate at episode 1 (usually 1.0 for pure random exploration).")
             eps_min = d2.slider("ε minimum", 0.0, 0.5, 0.05, 0.01,
-                help="Floor ε never drops below, so the agent keeps a little "
-                "exploration forever. Set it to 0 to let the policy fully commit.")
+                help="The floor ε never drops below.")
             decay = d3.slider("ε decay rate", 0.990, 0.9999, 0.998, 0.0001,
                 format="%.4f",
-                help="Per-episode multiplier: ε(k) = max(ε min, ε start · rate^k). "
-                "Lower = faster commitment. At 0.998, ε reaches 0.05 near episode "
-                "1,500 — match this to your episode count.")
+                help="Per-episode multiplier. Lower = faster commitment to greedy actions.")
             eps_params = (eps_start, eps_min, decay)
 
-    train = st.button("🚀 Train", type="primary", use_container_width=True,
-        help="Run Monte Carlo control on the current board.")
+    train = st.button("🚀 Train", type="primary", use_container_width=True)
     return gamma, episodes, max_steps, eps_kind, eps_params, train
 
 
@@ -366,24 +264,16 @@ def _algo_row():
 # ----------------------------------------------------------------------------- #
 def render():
     st.markdown("### Room 2 · Monte Carlo")
-    st.caption(
-        "Cross the icy corridors to the exit — and avoid the portal traps that "
-        "throw you back to the start.")
+    st.caption("Cross the icy corridors to the exit — and avoid portal traps that throw you back to the start.")
+    
     with st.expander("ℹ️ About this room", expanded=True):
         st.markdown(
-            "Room 1 could *compute* the answer because it knew the whole board. "
-            "Monte Carlo knows **nothing**: it plays complete episodes and averages "
-            "what actually happened. Early on it is a random walk that learns "
-            "nothing at all — until it stumbles onto the exit for the first time "
-            "and the reward finally has something to flow back through.\n\n"
-            "MC also never learns V directly — it averages returns into Q(s,a) and "
-            "reads off V(s) = maxₐ Q(s,a). That estimate is famously pessimistic "
-            "about itself, which is why the KPI reports the policy's **true** value "
-            "and the benchmark row explains the difference.\n\n"
-            "**How to use it:** shape the board, set γ and the exploration schedule, "
-            "then **🚀 Train**. Scrub the episode history to watch the value function "
-            "grow out from the exit, and compare it against the exact DP answer at "
-            "the bottom — the same board Room 1 solves in one shot.")
+            "Unlike Room 1, Monte Carlo knows **nothing** about the board physics. It learns entirely from sampled experience.\n\n"
+            "* **Model-Free Learning:** The agent wanders randomly until it stumbles onto the goal, then averages returns back into $Q(s,a)$.\n"
+            "* **Portal Traps:** Landing on a portal teleports you back to the start. The penalty is purely time-based, discounted by $\\gamma$.\n"
+            "* **Pessimistic Estimates:** MC's self-estimate $V_{MC}(s)$ understates the true policy value because it averages over early random-walk episodes and includes $\\epsilon$-greedy noise.\n"
+            "* **Usage:** Configure the environment and schedule -> **🚀 Train** -> Scrub checkpoints -> **▶️ Play Episode** (runs greedy, $\\epsilon=0$)."
+        )
 
     # --- Row 1: setup board + environment controls -------------------------- #
     board_col, env_col = st.columns([3, 2])
@@ -410,13 +300,11 @@ def render():
                              use_container_width=True, key="room2_setup_board")
     counts_now = (env["n_blocked"], env["n_slippery"], env["n_portals"])
     if counts_now != layout["counts"]:
-        setup_caption.caption("⚠️ Counts changed — click 🎲 Regenerate to apply.")
+        setup_caption.caption("⚠️ Counts changed — click **🎲 Regenerate** to apply.")
     elif len(portals) < env["n_portals"]:
-        setup_caption.caption(
-            f"Placed {len(portals)} of {env['n_portals']} portals — the rest would "
-            "have sealed the exit off.")
+        setup_caption.caption(f"Placed {len(portals)} of {env['n_portals']} portals — others would have sealed the exit.")
     else:
-        setup_caption.caption("Board layout — set the algorithm below and 🚀 Train.")
+        setup_caption.caption("Board layout — select an algorithm below and **🚀 Train**.")
 
     # --- Row 2: algorithm parameters ---------------------------------------- #
     st.divider()
@@ -450,13 +338,9 @@ def render():
     last = slice(-100, None)
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Success rate (last 100)", f"{success[last].mean():.0%}",
-              help="Share of the final 100 training episodes that reached the exit "
-              "within the step cap. This is measured while still exploring, so it "
-              "sits below what ▶️ Play (ε = 0) achieves.")
+              help="Share of final 100 training episodes that reached the exit within the step cap (includes ε-greedy noise).")
     m2.metric("Mean return (last 100)", f"{returns[last].mean():+.1f}",
-              help="Average discounted return G over the final 100 episodes — the "
-              "same quantity as V, so it is directly comparable to V*(S). Measured "
-              "while still exploring, so it sits below the policy's true value.")
+              help="Average discounted return G over the final 100 training episodes.")
 
     # View controls above the board.
     key = "room2_view_cp"
@@ -465,30 +349,20 @@ def render():
     v_col, a_col = st.columns([3, 1])
     with v_col:
         cp_i = st.slider("View checkpoint", 1, n_cp, n_cp, key=key,
-            help="Replay the value function and greedy policy as they stood at "
-            f"each of {n_cp} checkpoints across training — watch value spread "
-            "backward from the exit as episodes accumulate.") if n_cp > 1 else 1
+            help="Scrub through training checkpoints to watch value diffusion over time.") if n_cp > 1 else 1
     with a_col:
-        show_arrows = st.checkbox("Show policy arrows", value=True,
-            help="Overlay the greedy action in each cell for the viewed checkpoint.")
+        show_arrows = st.checkbox("Show policy arrows", value=True)
 
     snap = history[cp_i - 1]
     V, policy, view_ep = snap["V"], snap["policy"], snap["episode"]
 
-    # The exact value of the viewed policy — still needed by the benchmark row,
-    # where MC's own (much lower) estimate of itself is put beside it.
     V_greedy = _learned_policy_value(*keys, env["slip"], env["goal_reward"], gamma,
                                      tuple(sorted(policy.items())))
     v_gre_start, v_star_start = V_greedy[START], V_star[START]
     v_mc_start = V.get(START, 0.0)
     m3.metric("Start-state value V(S)", f"{v_mc_start:.1f}",
-              help="What MC estimates the start is worth at this checkpoint: "
-              "max_a Q(S,a). See the benchmark row for how it compares to the exact "
-              "answer, and for what the policy is really worth.")
-
-    m4.metric("ε at checkpoint", f"{snap['eps']:.3f}",
-              help="The exploration rate in force at the viewed checkpoint — the "
-              "chance the agent ignored its policy and moved at random.")
+              help="MC's estimate of the start state value: max_a Q(S, a).")
+    m4.metric("ε at checkpoint", f"{snap['eps']:.3f}")
 
     res_board_col, res_ctrl_col = st.columns([3, 2])
     with res_board_col:
@@ -497,30 +371,17 @@ def render():
     with res_ctrl_col:
         st.markdown("**▶️ Play** — greedy, ε = 0")
         play_max_steps = st.slider("Max steps per episode", 10, 500, 200,
-            help="Cap for THIS playback only — separate from the training cap "
-            "above. On ice the agent can wander; past this it times out.")
-        speed = st.select_slider("Animation speed", ["Slow", "Normal", "Fast"],
-            "Normal", help="Playback speed of the animated episode.")
-        play = st.button("▶️ Play Episode", type="primary",
-            use_container_width=True,
-            help="The plan's 'test mode': runs the viewed policy with exploration "
-            "switched off (ε = 0) across the real, stochastic ice and reports its "
-            "discounted return G.")
+            help="Step cap for this test rollout.")
+        speed = st.select_slider("Animation speed", ["Slow", "Normal", "Fast"], "Normal")
+        play = st.button("▶️ Play Episode", type="primary", use_container_width=True,
+            help="Run a test rollout of the viewed policy with exploration turned off (ε = 0).")
         episode_slot = st.container()
 
-    results_caption.caption(
-        f"Value & greedy policy after **{view_ep:,}** episodes "
-        f"(checkpoint {cp_i} of {n_cp})")
+    results_caption.caption(f"Value & greedy policy after **{view_ep:,}** episodes (checkpoint {cp_i} of {n_cp})")
 
-    # An episode is EPHEMERAL: it lives only in the run that played it. Nothing
-    # goes to session state — a stored rollout outlives the policy it was run
-    # against, so scrubbing to another checkpoint would redraw a stale trail over
-    # a policy that never produced it.
     if play:
         path, G_ep, outcome, landings = rollout(
             grid, policy, gamma=gamma, max_steps=play_max_steps, with_landings=True)
-        # Draw the portal touch as its own frame, else the jump back to the
-        # start looks like a rendering glitch rather than a trap firing.
         frames = []
         for k in range(len(path)):
             if landings[k] != path[k]:
@@ -542,21 +403,13 @@ def render():
                 st.warning("⏱️ Timed out before reaching the exit.")
             e1, e2, e3 = st.columns(3)
             e1.metric("Return G", f"{score:+.1f}",
-                help="On a WIN this is the real discounted return G = Σ γ^t·r₍t+1₎. "
-                f"A run that fails to escape scores a flat {LOSS_SCORE:+.0f}, so "
-                "giving up always ranks below escaping. One sample of a stochastic "
-                "rollout: play again and it will differ. (The training curves below "
-                "show the RAW returns MC actually learned from — no penalty.)")
-            e2.metric("Steps", len(path) - 1,
-                help="Number of moves before the episode ended.")
-            e3.metric("Result", "✅" if outcome == "goal" else "❌",
-                help="Whether the agent reached the exit within the step cap.")
+                help=f"Total discounted return. Assigns a flat {LOSS_SCORE:+.0f} if the agent times out.")
+            e2.metric("Steps", len(path) - 1)
+            e3.metric("Result", "✅" if outcome == "goal" else "❌")
             if outcome != "goal":
-                st.caption(
-                    f"Shown as a flat {LOSS_SCORE:+.0f} for not escaping; the raw "
-                    f"discounted return was {G_ep:+.1f}.")
+                st.caption(f"Scored as {LOSS_SCORE:+.0f} for timing out; raw return was {G_ep:+.1f}.")
             if portals_hit:
-                st.caption(f"🌀 Sent back to the start {portals_hit}× this run.")
+                st.caption(f"🌀 Sent back to start {portals_hit}× this run.")
     else:
         results_board.plotly_chart(
             _figure(grid, V, policy, show_arrows),
@@ -567,50 +420,35 @@ def render():
                     use_container_width=True)
     st.plotly_chart(_steps_curve(steps, success, view_ep), use_container_width=True)
     st.plotly_chart(_epsilon_curve(stats["eps"], view_ep), use_container_width=True)
-    st.caption(
-        "ε is the chance the agent ignored its policy and moved at random. Read it "
-        "against the two curves above: the return climbs as ε falls, because the "
-        "agent stops paying for exploration it no longer needs — and the gap that "
-        "remains to V* is largely the exploration it is still doing.")
+    st.caption("As exploration ($\epsilon$) drops, returns climb and step counts fall. The remaining gap to $V^*$ is largely residual exploration noise.")
 
     # --- DP benchmark row --------------------------------------------------- #
     st.divider()
-    st.markdown("#### 📐 Benchmark against the exact answer")
-    st.caption(
-        "Room 1's Dynamic Programming solves this exact board from the model. "
-        "Monte Carlo never sees any of it — it only samples episodes. This is the "
-        "same value function, computed vs. learned — and with **Show policy arrows** "
-        "on, the same comparison for the policy: every cell where the arrows differ "
-        "is one where sampling has not yet found what the model already knows.")
+    st.markdown("#### 📐 Benchmark against exact Dynamic Programming")
+    st.caption("Compares Monte Carlo's sampled estimate against Room 1's exact model solution ($V^*$). Arrow differences show where sampling hasn't converged to the true optimal policy yet.")
 
     n1, n2, n3 = st.columns(3)
     n1.metric("V_MC(S) — what MC believes", f"{v_mc_start:.1f}",
-              help="max_a Q(S,a), MC's own estimate — the number it learned. Read "
-              "the caption below before trusting it as a measure of the policy.")
+              help="max_a Q(S,a) — MC's internal estimate of the start state.")
     n2.metric("True V(S) of that policy", f"{v_gre_start:.1f}",
-              help="What the very same policy is actually worth, evaluated exactly "
-              "against the model. Higher than MC's own estimate.")
+              help="The actual model-evaluated value of the learned greedy policy.")
     n3.metric("V*(S) — exact optimal", f"{v_star_start:.1f}",
-              help="The best any policy can do on this board — Room 1's answer.")
-    st.caption(
-        f"**Why the first two disagree.** MC never learns V directly: it averages "
-        f"returns into Q(s,a), and V_MC(s) is just max_a Q(s,a). That number "
-        f"understates the policy for two compounding reasons. **(1)** Q is the value "
-        f"of the *ε-greedy* agent, which keeps making random moves — not of the "
-        f"greedy policy ▶️ Play runs. **(2)** Q is a plain average over *every* "
-        f"episode ever run (step size 1/N), so the early random-walk returns are "
-        f"weighted exactly as heavily as recent ones and are never forgotten. "
-        f"So MC's self-estimate reads {v_mc_start:.1f} while the policy it found is "
-        f"genuinely worth {v_gre_start:.1f} of a possible {v_star_start:.1f}.")
+              help="The theoretical best possible return, computed via DP.")
+    
+    st.markdown(
+        "**Why $V_{MC}$ understates the True Policy Value:**\n"
+        "* **$\epsilon$-Greedy Drag:** $Q$ values reflect the policy *plus* random exploratory moves, while True $V(S)$ evaluates the pure greedy policy ($\epsilon=0$).\n"
+        "* **Lifetime Averaging:** Standard MC uses a $1/N$ step size, meaning poor returns from early random-walk episodes permanently drag down the average."
+    )
 
     b1, b2 = st.columns(2)
     with b1:
-        st.markdown(f"**V_MC — sampled ({view_ep:,} episodes)**")
+        st.markdown(f"**V_MC — Sampled ({view_ep:,} episodes)**")
         st.plotly_chart(
             _figure(grid, V, policy, show_arrows, height=420),
             use_container_width=True, key="room2_bench_mc")
     with b2:
-        st.markdown("**V\\* — computed exactly (DP)**")
+        st.markdown("**V\\* — Exact Optimal (DP)**")
         st.plotly_chart(
             _figure(grid, V_star, pi_star, show_arrows, height=420),
             use_container_width=True, key="room2_bench_dp")

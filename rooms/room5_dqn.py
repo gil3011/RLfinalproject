@@ -1,16 +1,3 @@
-"""
-Room 5 · Deep Q-Learning — a continuous arena with one chasing enemy.
-
-Unlike Rooms 1–4 (tabular dict-MDPs), Room 5 is continuous and model-free: a
-`gymnasium` env (`core/chase_arena.py`) trained with a Double-DQN
-(`algorithms/deep_q.py`, adapted from `code examples/dql/dqn.py`). The board is a
-Plotly figure over metres, not a cell grid, and the room's visual argument is the
-network's value FIELD — a value that exists between the sample points, which no
-tabular room can draw.
-
-Follows the shared UI contract (docs/UI_STRUCTURE.md): on-page controls, tooltips
-everywhere, train-gated results, ephemeral Play episode.
-"""
 from __future__ import annotations
 
 import time
@@ -43,10 +30,6 @@ _EVAL_SEED = 4242            # fixed spawn for the scrubber/results, so it is st
 # ───────────────────────── board figure ─────────────────────────
 def _arena_figure(enemies, agent=None, field=None, path=None, dead=False,
                   enemy_kinds=None, countdown=None):
-    """Plotly figure of the arena. `enemies` is a single (x, y) or an (n, 2) array;
-    `enemy_kinds` colours each by behaviour; `field` is an optional (xs, ys, Z)
-    value slice drawn as an RdBu heatmap underneath; `countdown` overlays a big
-    number for the pre-play 3-2-1."""
     fig = go.Figure()
 
     if enemies is None:
@@ -68,8 +51,6 @@ def _arena_figure(enemies, agent=None, field=None, path=None, dead=False,
             colorbar=dict(title="max Q", thickness=12, len=0.9),
             hoverinfo="skip"))
 
-    # exit square + catch discs are shapes (true sizes in metres), layer above the
-    # heatmap trace (layer="below" is below TRACES → painted over; see memory).
     fig.add_shape(type="rect", x0=EXIT[0]-GOAL_HALF, y0=EXIT[1]-GOAL_HALF,
                   x1=EXIT[0]+GOAL_HALF, y1=EXIT[1]+GOAL_HALF,
                   fillcolor="rgba(38,166,91,0.55)", line=dict(color="white", width=2),
@@ -360,10 +341,7 @@ def render():
                               field=frame_field),
                 use_container_width=True, key=f"room5_play_{k}")
             time.sleep(_STEP_DELAY[speed_sel])
-        # Scoreboard: a WIN shows its real return; ANY loss (caught or timed out)
-        # shows a flat −100, mirroring the +100 exit (Rooms 2–4 convention). This is
-        # the displayed number only — the learner never sees it (measured: a timeout
-        # penalty in the learning signal makes Room 5 time out MORE, not less).
+
         won = pr["outcome"] == "escaped"
         score = pr["return"] if won else LOSS_SCORE
         with episode_slot:
@@ -396,9 +374,7 @@ def _graphs(stats):
     ep = np.arange(1, len(stats["returns"]) + 1)
     outcome = np.array(stats["outcome"])
 
-    # Scored view: any loss (caught OR timed out) floors to −100 in the DISPLAY,
-    # mirroring the +100 exit and the Play scoreboard (Rooms 2–4 convention). Pure
-    # display transform — the learner updates off per-step rewards, never this.
+
     scored = np.where(stats["escaped"], stats["returns"], LOSS_SCORE)
     g1, g2 = st.columns(2)
     with g1:
