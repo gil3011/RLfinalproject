@@ -629,16 +629,36 @@ shield machinery would tangle the shared class. Instead:
 
 ### Room 6: Advanced DQL (Dynamic Obstacles & Radar Raycasting)
 
-> **STATUS: DESIGN ONLY — NOT BUILT (planned 2026-07-23 from the user's spec).** No code
-> exists yet; **everything below is design intent and acceptance criteria, nothing is
-> measured.** The room is a deliberate step up from Room 5: it re-adds ice **momentum**
-> (dropped in Room 5), replaces full enemy positions with **partial observation** (forward
-> radar only), and makes **generalisation** — not just escape rate — the headline. It carries
-> Room 5's hard-won, *measured* safeguards forward (Double DQN + reward-scaling + dense
-> shaping; strict Markov discipline; scoreboard-not-learning penalties; per-second friction;
-> measure-the-ceiling-before-you-tune; report ≥3 seeds because these rooms are bimodal). The
-> **build order and open decisions are at the end** — the env core and scripted baseline come
-> first, before any network, exactly as Room 5's baseline-band de-risked its design.
+> **STATUS: ✅ BUILT & MEASURED 2026-07-24 (branch `room-6`).** `core/radar_arena.py`
+> (`RadarArena`, passes `check_env` for all K∈{4,8,16,32}, static + moving) + `rooms/room6_radar.py`,
+> wired into `streamlit_app.py` (`NAV_ROOMS=[1..6]`); reuses `algorithms/deep_q.py` **unchanged**.
+> The design intent below was followed; the acceptance criteria are met. The room is a
+> deliberate step up from Room 5: it re-adds ice **momentum** (dropped in Room 5), replaces
+> full enemy positions with **partial observation** (radar only), and makes **generalisation**
+> — not just escape rate — the headline. It carries Room 5's hard-won, *measured* safeguards
+> forward (Double DQN + reward-scaling + dense shaping; strict Markov discipline;
+> scoreboard-not-learning penalties; per-second friction; measure-the-ceiling-before-you-tune;
+> report ≥3 seeds because these rooms are bimodal).
+>
+> **MEASURED RESULTS (n=6, K=8, X=3, μ=0.5, γ=0.95, decay-ε, deep_q unchanged):**
+> * **Physics winnable** — empty arena escapes 100% in ~42 steps (thrust beats friction).
+> * **Scripted baseline ceiling (§3, measured FIRST):** naive beeline vs reactive avoider —
+>   n=2 74%/77%, **n=6 46%/53%**, n=8 36%/45% (K=8)→**69% (K=32)**, n=12 21%/26%. Failures are
+>   COLLISIONS, not timeouts. **Perception resolution K is the dominant lever.** Hard-but-winnable
+>   band, exactly like Room 5's 51%→95%.
+> * **Static DQN:** **Generalisation Score 0.70/0.62/0.60 over 3 seeds (mean ~0.64) at 800 ep,
+>   NO bimodal collapse** — every seed cleanly ABOVE the scripted 0.53 ceiling and beeline 0.46
+>   floor (0.75 at 1200 ep). The net learns momentum-aware anticipation the myopic script can't;
+>   learned radar avoidance generalises to unseen layouts (the room's thesis).
+> * **Moving obstacles (range-rate channel, obs_dim 4+2K):** GEN 0.66/0.67 over 2 seeds at
+>   speed 0.6 — the Markov channel lets it still learn when obstacles drift. ⚠️ **Bug found &
+>   fixed:** `step()` initially rolled `prev_radar` forward BEFORE building the obs, so every
+>   range-rate read zero; the first moving measurement was discarded and re-run after the fix.
+> * **Decisions locked from the numbers:** static-first default; **straight-line shaping (NOT
+>   geodesic)** — deliberately dodges the wall-penalty BFS spike below; obstacles affect only
+>   collisions. Generation checks reachability once per finished layout → 2.5 ms/reset.
+> * Training uses `st.progress` + `progress_cb` (live bar, not a bg thread — episodes are short
+>   enough): ~60–130 s standalone for 800–1200 episodes.
 
 * **Task Description:** Escape a hazardous chamber to the exit, steering around obstacles you can only perceive through a fixed array of **forward radar rays** — not by knowing every obstacle's coordinates.
 * **State & Action Space:** Continuous. Observation = **self-dynamics** `[x, y, vₓ, v_y]` **+ K radar readings** (nearest-obstacle distance per ray), all normalised (below) → `obs_dim = 4 + K` for static obstacles (more with the moving-obstacle channel, below). **9 discrete acceleration actions** (the 8 compass thrusts + coast), reusing Room 5's fixed index order — but here an action sets **acceleration**, not displacement, so momentum carries between steps.

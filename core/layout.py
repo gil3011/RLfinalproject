@@ -20,7 +20,7 @@ ROOMS = {
 }
 
 # Rooms that are actually built and reachable from the nav bar.
-NAV_ROOMS = [1, 2, 3, 4, 5]
+NAV_ROOMS = [1, 2, 3, 4, 5, 6]
 
 
 def configure_page():
