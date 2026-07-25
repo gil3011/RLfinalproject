@@ -186,8 +186,11 @@ def dqn_control(
         returns[k] = G
         steps[k] = t
         escaped[k] = outcome == "escaped"
-        caught[k] = outcome == "caught"
         timeout[k] = outcome == "timeout"
+        # A "caught" episode is any FATAL terminal that isn't an escape or a timeout,
+        # so this counts Room 5's "caught" AND Room 6's "collided" alike (each env
+        # names its own death; the stat is generic).
+        caught[k] = not (escaped[k] or timeout[k])
         outcomes.append(outcome)
 
         if k in cp_at:
