@@ -627,11 +627,20 @@ shield machinery would tangle the shared class. Instead:
 
 ---
 
-### Room 6: Advanced DQL (Dynamic Obstacles & Radar Raycasting)
+### Room 6: Advanced DQL (Dynamic Obstacles & Light-based Vision)
 
 > **STATUS: ✅ BUILT & MEASURED 2026-07-24 (branch `room-6`).** `core/radar_arena.py`
 > (`RadarArena`, passes `check_env` for all K∈{4,8,16,32}, static + moving) + `rooms/room6_radar.py`,
 > wired into `streamlit_app.py` (`NAV_ROOMS=[1..6]`); reuses `algorithms/deep_q.py` **unchanged**.
+>
+> **⚙️ USER REVISIONS 2026-07-24 (after first build):** (1) **LIGHT, not radar** — the agent
+> sees EVERY obstacle within radius X (raycasting missed obstacles between rays). Implemented as
+> `K` angular SECTORS over the lit disc, each reporting its nearest obstacle centre; obs shape and
+> the network are unchanged, so the recipe/measurements carry over. (2) **A fixed obstacle is
+> ALWAYS in the middle** of the room (`CENTER=(5,5)`, obstacle 0), static even in moving mode.
+> (3) Dynamic-obstacle speed **default 0** (already was). (4) **Play-time obstacle-count slider** —
+> choose the count per Play run, independent of training (the fixed-size light handles any count).
+> UI/docstrings now say "light"; the module/class keep the `radar_arena`/`RadarArena` names.
 > The design intent below was followed; the acceptance criteria are met. The room is a
 > deliberate step up from Room 5: it re-adds ice **momentum** (dropped in Room 5), replaces
 > full enemy positions with **partial observation** (radar only), and makes **generalisation**
@@ -646,10 +655,13 @@ shield machinery would tangle the shared class. Instead:
 >   n=2 74%/77%, **n=6 46%/53%**, n=8 36%/45% (K=8)→**69% (K=32)**, n=12 21%/26%. Failures are
 >   COLLISIONS, not timeouts. **Perception resolution K is the dominant lever.** Hard-but-winnable
 >   band, exactly like Room 5's 51%→95%.
-> * **Static DQN:** **Generalisation Score 0.70/0.62/0.60 over 3 seeds (mean ~0.64) at 800 ep,
->   NO bimodal collapse** — every seed cleanly ABOVE the scripted 0.53 ceiling and beeline 0.46
->   floor (0.75 at 1200 ep). The net learns momentum-aware anticipation the myopic script can't;
->   learned radar avoidance generalises to unseen layouts (the room's thesis).
+> * **Static DQN (raycasting build):** Generalisation Score 0.70/0.62/0.60 over 3 seeds (~0.64)
+>   at 800 ep, no bimodal collapse — above the scripted 0.53 ceiling / 0.46 beeline floor.
+> * **Static DQN (LIGHT build — current):** the light revision (sees everything within X, no
+>   blind spots between rays) jumped it to **GEN 0.89 escape / 0.03 collision / 0.09 timeout at
+>   1200 ep** — collisions nearly vanish because nothing in radius is invisible; remaining losses
+>   are timeouts, not crashes. Trains ~80 s. The net learns momentum-aware anticipation the myopic
+>   scripted controller can't; avoidance generalises to unseen layouts (the room's thesis).
 > * **Moving obstacles (range-rate channel, obs_dim 4+2K):** GEN 0.66/0.67 over 2 seeds at
 >   speed 0.6 — the Markov channel lets it still learn when obstacles drift. ⚠️ **Bug found &
 >   fixed:** `step()` initially rolled `prev_radar` forward BEFORE building the obs, so every
