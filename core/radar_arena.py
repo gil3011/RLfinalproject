@@ -1,50 +1,48 @@
 """
 RadarArena — Room 6's environment: a continuous chamber the agent must cross to
-the exit while steering around obstacles it can only perceive through a fixed fan
-of radar rays (partial observation), under ICE MOMENTUM (velocity carries between
-steps). See Plan.md §Room 6.
+the exit while steering around obstacles it can only perceive through its LIGHT
+(partial observation), under ICE MOMENTUM (velocity carries between steps). See
+Plan.md §Room 6.
 
 This is a `gymnasium.Env` (like Room 5's `ChaseArena`), trained against the same
 5-tuple API and the SAME learning recipe (`algorithms/deep_q.py`, unchanged:
 Double DQN + reward-scaling + dense straight-line shaping). It is deliberately NOT
-an extension of `ChaseArena`, whose observation is enemy-relative positions rather
-than rays.
+an extension of `ChaseArena`, whose observation is enemy-relative positions.
 
 WHY THIS ROOM IS DIFFERENT FROM ROOM 5
 --------------------------------------
   * Momentum is back (Room 5 dropped it): the 9 discrete actions set ACCELERATION,
     not displacement, and friction is PER-SECOND (`v ← μ^dt·(v + a·dt)`), the exact
     thing Room 5's old build measured must not be per-step.
-  * Partial observation: the net never sees obstacle coordinates. It sees its own
-    `[x, y, vₓ, v_y]` plus `K` light readings — the distance to the nearest obstacle
-    in each of `K` direction sectors, within illumination radius `X`, else `X`.
+  * Partial observation: the net never sees the FULL layout. It sees its own
+    `[x, y, vₓ, v_y]` plus the obstacles inside its light radius `X` (below).
   * Generalisation is the thesis: obstacle count and positions are RE-SAMPLED every
     `reset()` (never fixed), so a memorised path cannot work — the light inputs must
     be USED, exactly as Room 5's per-episode enemy respawn forced the enemy channel.
 
-A LIGHT, NOT A RADAR — the agent sees EVERYTHING within radius X (user's spec)
------------------------------------------------------------------------------
-The agent carries a lamp that illuminates the whole disc of radius `X` around it: it
-is aware of EVERY obstacle inside that radius, not just what a thin ray happens to
-strike (raycasting leaves an obstacle sitting between two rays completely invisible).
-To feed a fixed-size network, the lit disc is split into `K` equal angular SECTORS;
-each in-range obstacle is binned to the sector its bearing falls in, and the reading
-for a sector is the distance to the NEAREST obstacle CENTRE in it (agent centre to
-obstacle centre — center-to-center, per the user's spec — not to the disc surface),
-capped at `X` ("clear"). Honest consequence, documented in the UI too: the usable
-clearance is `center_distance − OBSTACLE_RADIUS − AGENT_RADIUS`, so "lit at X" is NOT
-"collides at X". Sectors tile the full 360° (there is no single "forward" — the agent
-thrusts in any of 8 directions and the sensor stays orientation-independent → Markov).
+THE LIGHT — EVERYTHING within radius X is detected (user's spec)
+---------------------------------------------------------------
+The agent carries a lamp that lights the whole disc of radius `X` around it and is
+aware of EVERY obstacle inside that disc — there are no rays and no direction bins;
+anything in range is simply seen. To feed a fixed-size network, the observation
+carries the RELATIVE POSITION `(oₓ−x, o_y−y)/X` of each in-range obstacle, nearest
+first, in `MAX_OBSTACLES` fixed slots (unused slots are `(0, 0)` — a real obstacle
+can never be at the agent's exact centre, since that is a collision, so zero is an
+unambiguous "empty"). Obstacles OUTSIDE `X` are invisible (not in the observation).
+Detection is by centre distance (center-to-center, per the user's spec), so the
+usable clearance to a lit obstacle is `‖rel‖ − OBSTACLE_RADIUS − AGENT_RADIUS`:
+"lit at X" is NOT "collides at X" (documented in the UI too).
 
 MARKOV DISCIPLINE FOR MOVING OBSTACLES
 --------------------------------------
-A single light reading gives distance but not whether an obstacle is approaching or
-receding — non-Markov the moment obstacles move (the failure that killed lead
-pursuit and the timeout penalty in Room 5). So STATIC obstacles are single-frame
-(`obs_dim = 4 + K`, the default first build); turning on MOVING obstacles switches
-the observation on to carry a per-sector RANGE-RATE channel (`Δdistance` since the
-last step) → `obs_dim = 4 + 2·K`. The env exposes `obs_dim` for the room to read.
-(The central pillar always stays put — only the extra obstacles drift.)
+A single snapshot of positions is non-Markov once obstacles move — it cannot tell
+approaching from receding (the failure that killed lead pursuit and the timeout
+penalty in Room 5). So STATIC obstacles are position-only (`obs_dim = 4 + 2·M`, the
+default); turning on MOVING obstacles ADDS each lit obstacle's relative VELOCITY
+`(vₓ, v_y)/OBS_SPEED_NORM` to its slot → `obs_dim = 4 + 4·M`, which makes the motion
+observable (position + velocity is Markov — no frame-stacking needed). The env
+exposes `obs_dim` for the room to read. (The central pillar always stays put — only
+the extra obstacles drift, so its velocity slot is zero.)
 
 SHAPING avoids Room 6's most dangerous trap on purpose
 ------------------------------------------------------
@@ -92,9 +90,13 @@ DT = 0.1
 THRUST = 3.0                                         # acceleration magnitude (m/s²); beats friction
 VMAX = 5.0                                           # speed cap (also the velocity normaliser)
 
-# ── Light-sensor defaults (all user-configurable in the room). ──
+# ── Light sensor. Everything within LIGHT_RADIUS is detected; the observation packs
+#    the nearest MAX_OBSTACLES in-range obstacles as relative positions. MAX_OBSTACLES
+#    must be ≥ the obstacle-count slider max so "everything in range" is never truncated
+#    (at X = arena size, all obstacles can be lit at once). ──
 LIGHT_RADIUS = 3.0                                   # X: illumination radius, metres (center-to-center)
-N_SECTORS = 8                                        # K: angular sectors the lit disc is split into
+MAX_OBSTACLES = 12                                   # M: observation slots = obstacle-count slider max
+OBS_SPEED_NORM = 1.5                                 # velocity normaliser (= dynamic-speed slider max)
 
 # The 9 acceleration directions, indexed EXACTLY as Room 5 / Plan.md §Room 5's
 # table: dx = a//3 − 1, dy = a%3 − 1. Action 4 = coast (no thrust). Non-zero
@@ -104,14 +106,6 @@ _RAW = np.array([[a // 3 - 1, a % 3 - 1] for a in range(9)], dtype=np.float64)
 _NORM = np.linalg.norm(_RAW, axis=1, keepdims=True)
 _NORM[_NORM == 0] = 1.0                              # action 4 (coast) stays (0,0)
 ACCEL_DIRS = _RAW / _NORM                            # shape (9, 2), unit directions (coast = 0)
-
-
-def _sector_dirs(k: int) -> np.ndarray:
-    """`k` unit direction vectors at the CENTRES of the K angular sectors, fanned
-    evenly around the full circle (world frame). Used both to bin obstacles and to
-    draw the light beams."""
-    ang = np.linspace(0.0, 2.0 * np.pi, k, endpoint=False)
-    return np.stack([np.cos(ang), np.sin(ang)], axis=1)
 
 
 def _seg_point_min_dist(p0, p1, c) -> float:
@@ -129,26 +123,24 @@ def _seg_point_min_dist(p0, p1, c) -> float:
 
 class RadarArena(gym.Env):
     """Continuous momentum arena with LIGHT-based obstacle perception (Room 6): the
-    agent is aware of every obstacle within illumination radius X, direction-resolved
-    into K angular sectors.
+    agent detects EVERY obstacle within illumination radius X, as relative positions.
 
-    Observation (all normalised to ~[0,1] / [-1,1]):
-      static  : [x/A, y/A, vₓ/VMAX, v_y/VMAX] + K light/X           → obs_dim = 4 + K
-      moving  : the above + K range-rate (Δlight/X, clipped)        → obs_dim = 4 + 2K
-    9 discrete acceleration actions. Reaching the goal square = +goal_reward;
-    hitting an obstacle (or the same-radius contact) = −catch_penalty and ends the
-    episode; the step cap truncates (timeout, display-only −100)."""
+    Observation (all normalised to ~[0,1] / [-1,1]), M = MAX_OBSTACLES slots:
+      static  : [x/A, y/A, vₓ/VMAX, v_y/VMAX] + M·(relₓ, rel_y)/X   → obs_dim = 4 + 2M
+      moving  : the above, each slot also + (vₓ, v_y)/OBS_SPEED_NORM → obs_dim = 4 + 4M
+    In-range obstacles fill slots nearest-first; empty slots are 0. 9 discrete
+    acceleration actions. Reaching the goal square = +goal_reward; hitting an obstacle
+    = −catch_penalty and ends the episode; the step cap truncates (timeout, −100)."""
 
     metadata = {"render_modes": []}
 
     def __init__(
         self,
         n_obstacles: int = 6,
-        n_sectors: int = N_SECTORS,
         light_radius: float = LIGHT_RADIUS,
         friction: float = 0.5,           # μ per SECOND (retention); lower = more drag
         thrust: float = THRUST,
-        obstacle_speed: float = 0.0,     # 0 = static (default, Markov single-frame)
+        obstacle_speed: float = 0.0,     # 0 = static (default, position-only obs)
         max_steps: int = 200,
         random_layout: bool = True,      # re-sample obstacles each reset (off ⇒ fixed seed)
         shaping_coef: float = 1.0,       # dense straight-line progress toward exit
@@ -157,8 +149,7 @@ class RadarArena(gym.Env):
         layout_seed: int = 12345,        # used when random_layout=False (deterministic warm-up)
     ):
         super().__init__()
-        self.n_obstacles = int(n_obstacles)
-        self.n_sectors = int(n_sectors)
+        self.n_obstacles = min(int(n_obstacles), MAX_OBSTACLES)
         self.light_radius = float(light_radius)
         self.friction = float(friction)
         self.thrust = float(thrust)
@@ -171,16 +162,14 @@ class RadarArena(gym.Env):
         self.catch_penalty = float(catch_penalty)
         self.layout_seed = int(layout_seed)
 
-        self.sector_dirs = _sector_dirs(self.n_sectors)
-        # obs_dim: static is single-frame (Markov); moving adds a range-rate channel.
-        self.obs_dim = 4 + self.n_sectors * (2 if self.moving else 1)
+        # obs_dim: static is position-only (Markov); moving adds a velocity per slot.
+        self.slot_dim = 4 if self.moving else 2
+        self.obs_dim = 4 + MAX_OBSTACLES * self.slot_dim
 
-        # Bounds: pos [0,1], vel [-1,1], light [0,1]; range-rate (moving) in [-1,1].
-        lo = [0.0, 0.0, -1.0, -1.0] + [0.0] * self.n_sectors
-        hi = [1.0, 1.0, 1.0, 1.0] + [1.0] * self.n_sectors
-        if self.moving:
-            lo += [-1.0] * self.n_sectors
-            hi += [1.0] * self.n_sectors
+        # Bounds: pos [0,1], vel [-1,1], then M slots of (rel/X) [-1,1] and, if moving,
+        # (obstacle velocity / OBS_SPEED_NORM) [-1,1].
+        lo = [0.0, 0.0, -1.0, -1.0] + [-1.0] * (MAX_OBSTACLES * self.slot_dim)
+        hi = [1.0, 1.0, 1.0, 1.0] + [1.0] * (MAX_OBSTACLES * self.slot_dim)
         self.observation_space = spaces.Box(low=np.array(lo, np.float32),
                                             high=np.array(hi, np.float32))
         self.action_space = spaces.Discrete(9)
@@ -189,7 +178,6 @@ class RadarArena(gym.Env):
         self.vel = np.zeros(2)
         self.obstacles = np.zeros((0, 2))
         self.obs_vel = np.zeros((0, 2))
-        self.prev_light = None
         self.t = 0
 
     # ── layout generation ─────────────────────────────────────────────────────
@@ -263,42 +251,36 @@ class RadarArena(gym.Env):
         return np.array(placed, dtype=np.float64)
 
     # ── light sensor ──────────────────────────────────────────────────────────
-    def _sense(self) -> np.ndarray:
-        """LIGHT reading per angular sector: the agent's lamp lights the whole disc
-        of radius X, so EVERY obstacle within X is seen (not just what a thin ray
-        strikes). Each in-range obstacle is binned to the sector its bearing falls
-        in, and the sector reports the nearest obstacle CENTRE-TO-CENTRE distance in
-        it (|agent − centre|, NOT to the surface — user's spec), else X ('dark')."""
-        X = self.light_radius
-        readings = np.full(self.n_sectors, X)
+    def _detect(self):
+        """The lamp lights the whole disc of radius X: EVERY obstacle inside it is
+        detected. Returns `lit` — the indices of in-range obstacles, nearest first
+        (centre-to-centre, per the user's spec) — capped at MAX_OBSTACLES slots."""
         if not len(self.obstacles):
-            return readings
-        rel = self.obstacles - self.agent              # (m, 2)
-        dist = np.hypot(rel[:, 0], rel[:, 1])          # centre-to-centre (m,)
-        ang = np.arctan2(rel[:, 1], rel[:, 0]) % (2 * np.pi)
-        sector = np.round(ang / (2 * np.pi / self.n_sectors)).astype(int) % self.n_sectors
-        for i in range(len(self.obstacles)):
-            if dist[i] <= X and dist[i] < readings[sector[i]]:
-                readings[sector[i]] = float(dist[i])
-        return readings
+            return np.empty(0, dtype=int)
+        rel = self.obstacles - self.agent
+        dist = np.hypot(rel[:, 0], rel[:, 1])
+        lit = np.where(dist <= self.light_radius)[0]
+        lit = lit[np.argsort(dist[lit])]               # nearest first
+        return lit[:MAX_OBSTACLES]
 
     # ── obs / info ────────────────────────────────────────────────────────────
-    def _obs(self, light: np.ndarray) -> np.ndarray:
+    def _obs(self, lit: np.ndarray) -> np.ndarray:
         base = [self.agent[0] / ARENA, self.agent[1] / ARENA,
                 self.vel[0] / VMAX, self.vel[1] / VMAX]
-        norm_light = (light / self.light_radius).tolist()
-        if self.moving:
-            if self.prev_light is None:
-                rate = np.zeros(self.n_sectors)
-            else:
-                rate = (light - self.prev_light) / self.light_radius
-            rate = np.clip(rate, -1.0, 1.0).tolist()
-            return np.array(base + norm_light + rate, dtype=np.float32)
-        return np.array(base + norm_light, dtype=np.float32)
+        slots = np.zeros((MAX_OBSTACLES, self.slot_dim), dtype=np.float32)
+        for s, i in enumerate(lit):
+            rel = (self.obstacles[i] - self.agent) / self.light_radius   # in [-1,1]
+            slots[s, 0], slots[s, 1] = rel[0], rel[1]
+            if self.moving:                            # + relative velocity (Markov)
+                v = self.obs_vel[i] / OBS_SPEED_NORM
+                slots[s, 2], slots[s, 3] = np.clip(v[0], -1, 1), np.clip(v[1], -1, 1)
+        return np.concatenate([np.array(base, np.float32), slots.ravel()])
 
-    def _info(self, light, outcome=None) -> dict:
+    def _info(self, lit, outcome=None) -> dict:
+        detected = np.zeros(len(self.obstacles), dtype=bool)
+        detected[lit] = True
         return {"agent": self.agent.copy(), "vel": self.vel.copy(),
-                "obstacles": self.obstacles.copy(), "light": light.copy(),
+                "obstacles": self.obstacles.copy(), "detected": detected,
                 "outcome": outcome}
 
     # ── gymnasium API ─────────────────────────────────────────────────────────
@@ -325,10 +307,8 @@ class RadarArena(gym.Env):
         else:
             self.obs_vel = np.zeros((len(self.obstacles), 2))
 
-        self.prev_light = None
-        light = self._sense()
-        self.prev_light = light.copy()
-        return self._obs(light), self._info(light)
+        lit = self._detect()
+        return self._obs(lit), self._info(lit)
 
     def _move_obstacles(self):
         """Advance moving obstacles one tick, bouncing off the arena walls. Depends
@@ -374,7 +354,7 @@ class RadarArena(gym.Env):
 
         self.agent = a1
         self.t += 1
-        light = self._sense()
+        lit = self._detect()
 
         reached = abs(a1[0] - EXIT[0]) < GOAL_HALF and abs(a1[1] - EXIT[1]) < GOAL_HALF
         d_old = float(np.hypot(*(a0 - EXIT)))
@@ -391,25 +371,20 @@ class RadarArena(gym.Env):
         if truncated:
             outcome = "timeout"
 
-        info = self._info(light, outcome)
-        # Build the observation FIRST (range-rate needs the PREVIOUS reading), then
-        # roll prev_light forward for the next step. Order matters: updating
-        # prev_light before _obs would make every range-rate read zero.
-        obs_out = self._obs(light)
-        self.prev_light = light.copy()
-        return obs_out, float(reward), terminated, truncated, info
+        info = self._info(lit, outcome)
+        return self._obs(lit), float(reward), terminated, truncated, info
 
 
 # ── rollout helpers for the room (this env has obstacles + a light sensor, not
 #    enemies, so it needs its own rollout — deep_q.greedy_rollout is Chase-specific) ─
 def greedy_rollout(net, env, seed=None, options=None):
     """One greedy (ε=0) episode. Returns per-step frames (agent, vel, obstacles,
-    light) plus outcome / raw return / step count. Ephemeral — render and drop it.
-    Imports torch lazily so `radar_arena` stays importable without torch."""
+    detected-mask) plus outcome / raw return / step count. Ephemeral — render and
+    drop it. Imports torch lazily so `radar_arena` stays importable without torch."""
     import torch
     obs, info = env.reset(seed=seed, options=options)
     frames = [{"agent": info["agent"].copy(), "vel": info["vel"].copy(),
-               "obstacles": info["obstacles"].copy(), "light": info["light"].copy()}]
+               "obstacles": info["obstacles"].copy(), "detected": info["detected"].copy()}]
     G, t, outcome = 0.0, 0, "timeout"
     while True:
         with torch.no_grad():
@@ -418,7 +393,7 @@ def greedy_rollout(net, env, seed=None, options=None):
         G += r
         t += 1
         frames.append({"agent": info["agent"].copy(), "vel": info["vel"].copy(),
-                       "obstacles": info["obstacles"].copy(), "light": info["light"].copy()})
+                       "obstacles": info["obstacles"].copy(), "detected": info["detected"].copy()})
         if term or trunc:
             outcome = info.get("outcome") or ("timeout" if trunc else "collided")
             break
