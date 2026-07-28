@@ -121,6 +121,27 @@ def render_room_completion_controls(room_number: int) -> None:
 
     st.markdown("---")
     if has_next:
+        # Blue "next room" button — scoped to this button's key so the other
+        # primary buttons (Train / Play) keep the theme's default colour.
+        st.markdown(
+            """<style>
+            [class*="st-key-continue_room_"] button {
+                background-color: #2563eb !important;
+                border-color: #2563eb !important;
+                color: #ffffff !important;
+            }
+            [class*="st-key-continue_room_"] button:hover {
+                background-color: #1d4ed8 !important;
+                border-color: #1d4ed8 !important;
+            }
+            [class*="st-key-continue_room_"] button:active,
+            [class*="st-key-continue_room_"] button:focus {
+                background-color: #1e40af !important;
+                border-color: #1e40af !important;
+            }
+            </style>""",
+            unsafe_allow_html=True,
+        )
         if st.button(
             f"Continue to {ROOMS[next_room]} →",
             key=f"continue_room_{room_number}",

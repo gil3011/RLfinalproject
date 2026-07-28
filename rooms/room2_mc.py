@@ -6,7 +6,7 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
-from algorithms.dynamic_programming import policy_value, value_iteration
+from algorithms.dynamic_programming import value_iteration
 from algorithms.monte_carlo import (CONSTANT, DECAYING, monte_carlo_control,
                                     moving_average)
 from core.episode import LOSS_SCORE, rollout, scored_return
@@ -51,14 +51,6 @@ def _dp_optimal(blocked_t, ice_t, portals_t, slip, goal_reward, gamma):
     grid = _make_grid(set(blocked_t), set(ice_t), set(portals_t), slip, goal_reward)
     V, policy, _ = value_iteration(grid, gamma=gamma)
     return V, policy
-
-
-@st.cache_data(show_spinner=False)
-def _learned_policy_value(blocked_t, ice_t, portals_t, slip, goal_reward, gamma,
-                          policy_t):
-    """Exact value of a LEARNED policy — how good it actually is."""
-    grid = _make_grid(set(blocked_t), set(ice_t), set(portals_t), slip, goal_reward)
-    return policy_value(grid, dict(policy_t), gamma)
 
 
 def _regenerate_layout(env, seed, version):
@@ -146,7 +138,7 @@ def _figure(grid, V, policy, show_arrows, trail=None, agent=None,
     return fig
 
 
-def _returns_curve(returns, v_star_start, view_ep):
+def _returns_curve(returns, view_ep):
     n = len(returns)
     x = np.arange(1, n + 1)
     fig = go.Figure()
@@ -156,14 +148,12 @@ def _returns_curve(returns, v_star_start, view_ep):
     fig.add_trace(go.Scatter(
         x=x, y=moving_average(returns, _MA_WINDOW), mode="lines",
         line={"color": "#1d4ed8", "width": 2}, name=f"{_MA_WINDOW}-episode average"))
-    fig.add_hline(y=v_star_start, line_dash="dash", line_color="#ef4444",
-                  annotation_text=f"DP optimal V*(S) = {v_star_start:.1f}")
     fig.add_vline(x=view_ep, line_dash="dot", line_color="#f59e0b",
                   annotation_text=f"viewing ep {view_ep}")
     fig.update_yaxes(title="discounted return G")
     fig.update_xaxes(title="episode")
     fig.update_layout(margin={"l": 10, "r": 10, "t": 48, "b": 10}, height=300,
-                      title="Episode return — MC settles below V* by the ε-gap",
+                      title="Episode return — climbs as exploration decays",
                       legend={"orientation": "h", "y": -0.2})
     return fig
 
@@ -211,13 +201,13 @@ GOAL_REWARD = 100.0  # fixed across all rooms (project convention)
 
 def _env_controls():
     st.markdown("##### 🎮 Environment & Physics")
-    n_blocked = st.slider("Blocked cells 🧱", 0, 30, 22,
+    n_blocked = st.slider("Blocked cells 🧱", 0, 30, 10,
         help="Impassable walls that form corridors. A valid path to the exit is always preserved.")
-    n_slippery = st.slider("Slippery cells 🟦", 0, 40, 25,
+    n_slippery = st.slider("Slippery cells 🟦", 0, 40, 20,
         help="Ice cells where movement may slide sideways.")
     slip = st.slider("Slip probability", 0.0, 0.8, 0.35, 0.05,
         help="Chance of sliding perpendicular to the intended direction on ice.")
-    n_portals = st.slider("Portal traps 🌀", 0, 5, 4,
+    n_portals = st.slider("Portal traps 🌀", 0, 5, 5,
         help="Traps that teleport the agent back to the start. No point penalty, but costs time (discounted by γ).")
     regen = st.button("🎲 Regenerate layout", use_container_width=True,
         help="Generate a new layout with the selected cell counts.")
@@ -269,7 +259,7 @@ def render():
     st.markdown("### Room 2 · Monte Carlo")
     st.caption("Cross the icy corridors to the exit — and avoid portal traps that throw you back to the start.")
     
-    with st.expander("ℹ️ About this room", expanded=True):
+    with st.expander("ℹ️ About this room", expanded=False):
         st.markdown(
             "Unlike Room 1, Monte Carlo knows **nothing** about the board physics. It learns entirely from sampled experience.\n\n"
             "* **Model-Free Learning:** The agent wanders randomly until it stumbles onto the goal, then averages returns back into $Q(s,a)$.\n"
@@ -339,7 +329,7 @@ def render():
     st.markdown("#### Training results")
 
     last = slice(-100, None)
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3 = st.columns(3)
     m1.metric("Success rate (last 100)", f"{success[last].mean():.0%}",
               help="Share of final 100 training episodes that reached the exit within the step cap (includes ε-greedy noise).")
     m2.metric("Mean return (last 100)", f"{returns[last].mean():+.1f}",
@@ -359,13 +349,7 @@ def render():
     snap = history[cp_i - 1]
     V, policy, view_ep = snap["V"], snap["policy"], snap["episode"]
 
-    V_greedy = _learned_policy_value(*keys, env["slip"], env["goal_reward"], gamma,
-                                     tuple(sorted(policy.items())))
-    v_gre_start, v_star_start = V_greedy[START], V_star[START]
-    v_mc_start = V.get(START, 0.0)
-    m3.metric("Start-state value V(S)", f"{v_mc_start:.1f}",
-              help="MC's estimate of the start state value: max_a Q(S, a).")
-    m4.metric("ε at checkpoint", f"{snap['eps']:.3f}")
+    m3.metric("ε at checkpoint", f"{snap['eps']:.3f}")
 
     res_board_col, res_ctrl_col = st.columns([3, 2])
     with res_board_col:
@@ -419,31 +403,14 @@ def render():
             use_container_width=True, key="room2_results_board")
 
     # --- Learning curves ---------------------------------------------------- #
-    st.plotly_chart(_returns_curve(returns, V_star[START], view_ep),
+    st.plotly_chart(_returns_curve(returns, view_ep),
                     use_container_width=True)
     st.plotly_chart(_steps_curve(steps, success, view_ep), use_container_width=True)
     st.plotly_chart(_epsilon_curve(stats["eps"], view_ep), use_container_width=True)
-    st.caption("As exploration ($\epsilon$) drops, returns climb and step counts fall. The remaining gap to $V^*$ is largely residual exploration noise.")
+    st.caption("As exploration ($\epsilon$) drops, returns climb and step counts fall.")
 
-    # --- DP benchmark row --------------------------------------------------- #
+    # --- Value map comparison ----------------------------------------------- #
     st.divider()
-    st.markdown("#### 📐 Benchmark against exact Dynamic Programming")
-    st.caption("Compares Monte Carlo's sampled estimate against Room 1's exact model solution ($V^*$). Arrow differences show where sampling hasn't converged to the true optimal policy yet.")
-
-    n1, n2, n3 = st.columns(3)
-    n1.metric("V_MC(S) — what MC believes", f"{v_mc_start:.1f}",
-              help="max_a Q(S,a) — MC's internal estimate of the start state.")
-    n2.metric("True V(S) of that policy", f"{v_gre_start:.1f}",
-              help="The actual model-evaluated value of the learned greedy policy.")
-    n3.metric("V*(S) — exact optimal", f"{v_star_start:.1f}",
-              help="The theoretical best possible return, computed via DP.")
-    
-    st.markdown(
-        "**Why $V_{MC}$ understates the True Policy Value:**\n"
-        "* **$\epsilon$-Greedy Drag:** $Q$ values reflect the policy *plus* random exploratory moves, while True $V(S)$ evaluates the pure greedy policy ($\epsilon=0$).\n"
-        "* **Lifetime Averaging:** Standard MC uses a $1/N$ step size, meaning poor returns from early random-walk episodes permanently drag down the average."
-    )
-
     b1, b2 = st.columns(2)
     with b1:
         st.markdown(f"**V_MC — Sampled ({view_ep:,} episodes)**")

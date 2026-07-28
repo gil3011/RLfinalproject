@@ -81,17 +81,6 @@ def _project(grid, table, phase, mask):
             if grid.phase_of(s) == phase and grid.mask_of(s) == mask}
 
 
-def _greedy_trace(grid, policy, max_len=200):
-    """Cells visited following `policy` greedily through the most-likely transition."""
-    s, cells = grid.start_state(), []
-    for _ in range(max_len):
-        cells.append(grid.cell_of(s))
-        if grid.is_terminal(s) or s not in policy:
-            break
-        s = max(grid.probs[(s, policy[s])].items(), key=lambda kv: kv[1])[0]
-    return cells
-
-
 def _takes_coin(grid, policy):
     s = grid.start_state()
     for _ in range(200):
@@ -182,27 +171,6 @@ def _figure(grid, V, policy, show_arrows, phase, mask, coin_cell, trail=None,
     return fig
 
 
-def _overlay_figure(grid, ql_cells, sa_cells, coin_cell, height=520):
-    z, text = _base_grid(grid, {}, {}, False, 0, 0, coin_cell)
-    fig = go.Figure(go.Heatmap(
-        z=z, text=text, texttemplate="%{text}", textfont={"size": 16},
-        colorscale="RdBu", zmid=0, showscale=False, hoverinfo="skip"))
-    for cells, colour, name, dash in (
-            (sa_cells, _SA_COLOR, "SARSA — detours", "solid"),
-            (ql_cells, _QL_COLOR, "Q-learning — walks the ledge", "dot")):
-        fig.add_trace(go.Scatter(
-            x=[c for _, c in cells], y=[r for r, _ in cells], mode="lines+markers",
-            line={"color": colour, "width": 3, "dash": dash},
-            marker={"size": 7, "color": colour}, name=name))
-    fig.update_layout(
-        shapes=_cell_shapes(grid, 0, 0, coin_cell),
-        margin={"l": 10, "r": 10, "t": 10, "b": 10}, height=height,
-        legend={"orientation": "h", "y": -0.05})
-    fig.update_yaxes(autorange="reversed", showticklabels=False)
-    fig.update_xaxes(showticklabels=False)
-    return fig
-
-
 def _falls_curve(falls_ql, falls_sa, view_ep):
     n = len(falls_ql)
     x = np.arange(1, n + 1)
@@ -266,11 +234,11 @@ GOAL_REWARD = 100.0  # fixed across all rooms; balances the -100 fall/catch pena
 
 def _env_controls():
     st.markdown("##### 🎮 Environment & Physics")
-    n_blocked = st.slider("Blocked cells 🧱", 0, 20, 8,
+    n_blocked = st.slider("Blocked cells 🧱", 0, 20, 15,
         help="Impassable walls. A safe detour avoiding the cliff edge is always preserved.")
-    n_slippery = st.slider("Slippery cells 🟦", 0, 40, 20,
+    n_slippery = st.slider("Slippery cells 🟦", 0, 40, 30,
         help="Ice cells where movement may slide sideways into hazards.")
-    slip = st.slider("Slip probability", 0.0, 0.8, 0.20, 0.05,
+    slip = st.slider("Slip probability", 0.0, 0.8, 0.3, 0.05,
         help="Chance of sliding perpendicular to the intended direction on ice.")
     coin_value = st.slider("Coin value 🪙", 0, 20, 5, 1,
         help="Bonus reward for the ledge coin — the key contrast dial. At the default 5, exact-optimal DP SKIPS the coin but Q-learning greedily takes it (over-optimism); at ~8+ the coin is genuinely worth it and the contrast fades.")
@@ -329,13 +297,13 @@ def render():
     st.markdown("### Room 4 · Q-Learning")
     st.caption("Time the patrol or brave the ledge for a coin — and contrast Q-learning against SARSA.")
     
-    with st.expander("ℹ️ About this room", expanded=True):
+    with st.expander("ℹ️ About this room", expanded=False):
         st.markdown(
             "Q-Learning is an **off-policy** Temporal Difference control algorithm that learns differently from Room 3's SARSA.\n\n"
             "* **Off-Policy Bootstrapping:** Q-learning updates toward $\\max_a Q(s',a)$ — assuming optimal future play without random exploration. From afar, the cliff ledge looks safe and the coin looks free.\n"
             "* **The Guard & Coin Setup:** A patrol guard $\\text{🚨}$ sweeps the safe upper detour (catching you is terminal), while a bonus coin $\\text{🪙}$ sits on the ledge. Both algorithms train on the exact same board.\n"
             "* **The Cliff-Walking Signature:** Q-learning aggressively walks the ledge to grab the coin, falling into the abyss far more often during training. SARSA prices in its own exploration noise ($\epsilon$) and detours safely.\n"
-            "* **Usage:** Configure physics -> **🚀 Train both** -> Compare routes on the overlay -> Scrub the guard phase to see dynamic pathing."
+            "* **Usage:** Configure physics -> **🚀 Train both** -> Scrub the guard phase to see dynamic pathing -> Compare the learning curves below."
         )
 
     # --- Row 1: setup board + environment controls -------------------------- #
@@ -512,14 +480,6 @@ def render():
             _figure(grid, V, policy, show_arrows, phase=phase, mask=mask,
                     coin_cell=coin_cell),
             use_container_width=True, key="room4_results_board")
-
-    # --- Path comparison overlay -------------------------------------------- #
-    st.markdown("##### 🛣️ Both routes at a glance")
-    ql_cells = _greedy_trace(grid, hist_ql[-1]["policy"])
-    sa_cells = _greedy_trace(grid, hist_sa[-1]["policy"])
-    st.plotly_chart(_overlay_figure(grid, ql_cells, sa_cells, coin_cell),
-                    use_container_width=True, key="room4_overlay")
-    st.caption("Q-learning (red dotted) typically hugs the ledge to grab the coin $\\text{🪙}$, while SARSA (blue solid) takes the safer upper detour around the guard $\\text{🚨}$.")
 
     # --- Learning curves ---------------------------------------------------- #
     st.plotly_chart(_falls_curve(stats_ql["falls"], stats_sa["falls"], view_ep),

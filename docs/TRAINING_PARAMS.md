@@ -37,7 +37,8 @@ dial in the measured-best from the tooltips.
 **Two places where the uniform default is knowingly suboptimal — raise them for
 the best result:**
 - **Room 3 exploration:** switch to **Constant ε = 0.10** (decaying-from-1.0 is
-  the worst schedule on a terminal cliff — see R3 below).
+  the worst schedule on a terminal cliff, and on the current slip-0.40 default it
+  collapses whole seeds to the flee-upward policy — see R3 below).
 - **Room 4 episodes:** raise to **10000** — 2000 under-trains both learners and
   muddies the SARSA-vs-Q-learning contrast (see R4 below).
 
@@ -146,16 +147,21 @@ only from sampled episodes. Benchmarked against Room 1's exact DP (V*).
 
 | Param | Range | **Default** | Notes |
 |---|---|---|---|
-| Blocked cells 🧱 | 0–30 | **22** | Corridors; start→goal path always preserved. |
-| Slippery cells 🟦 | 0–40 | **25** | Ice. |
+| Blocked cells 🧱 | 0–30 | **10** | Corridors; start→goal path always preserved. |
+| Slippery cells 🟦 | 0–40 | **20** | Ice. |
 | Slip probability | 0.0–0.8 | **0.35** | |
-| Portal traps 🌀 | 0–5 | **4** | Signature mechanic — teleport to start. Some may be dropped if they'd seal the exit. |
+| Portal traps 🌀 | 0–5 | **5** | Signature mechanic — teleport to start. Some may be dropped if they'd seal the exit. |
 | Goal reward 🏁 | — | **100 (fixed)** | Slider **removed** (was 10–1000). |
 
-**Change log (this pass):** removed goal-reward slider (fixed 100); raised
-default difficulty from 20/20/0.2/3 to **22/25/0.35/4**. Negative cells were
-already removed in an earlier pass (harsh penalties starve MC of successful
-episodes — see project memory).
+**Change log:** removed goal-reward slider (fixed 100). Default board reworked to
+**10 / 20 / 0.35 / 5** — a **more open** board (walls 22→10, ice 25→20) that
+leans on the **portal traps** (raised to the slider max, 5) as the signature
+challenge rather than dense walls. Effect: the board is *easier to navigate*, so
+V\* rises (~35→41 at γ=0.95) and the MC-vs-DP value gap shrinks (~18%→9%), but the
+three-way V\*/trueV/V_MC separation the room teaches survives cleanly. Negative
+cells were removed in an earlier pass (harsh penalties starve MC of successful
+episodes — see project memory). *(Earlier passes: 20/20/0.2/3 → 22/25/0.35/4 →
+current.)*
 
 ### Training parameters
 
@@ -167,10 +173,11 @@ episodes — see project memory).
 | Exploration | Decaying · Constant ε | **Decaying** |
 | ε start / min / decay | — | **1.0 / 0.05 / 0.999** |
 
-### Best parameters — measured (default board, avg of 4–5 seeds vs DP)
+### Best parameters — measured (default board 10/20/0.35/5, 4 layouts × 2 train seeds vs DP)
 
 MC reaches **100% training success** on this board at any reasonable setting
-(portals + generous step cap + ε-from-1.0 always eventually find the goal). The
+(portals + generous step cap + ε-from-1.0 always eventually find the goal), and
+the more open board makes convergence *easier* than the previous default. The
 discriminating metric is the **value-quality gap** = how far the learned greedy
 policy's *true* value (model-evaluated) sits below the exact optimal V*.
 
@@ -178,43 +185,42 @@ policy's *true* value (model-evaluated) sits below the exact optimal V*.
 
 | γ | V* | learned trueV | V_MC (MC's own) | gap to V* |
 |---|---|---|---|---|
-| 0.90 | 12.1 | 8.6 | 4.8 | 29% |
-| **0.95** | **35.5** | **29.1** | **19.1** | **18%** |
-| 0.97 | 54.0 | 50.5 | 35.1 | 6.5% |
-| 0.99 | 81.6 | 73.8 | 59.9 | 9.5% |
+| 0.90 | 16.0 | 14.0 | 8.2 | 13% |
+| **0.95** | **41.0** | **37.3** | **25.2** | **9%** |
+| 0.97 | 58.9 | 55.8 | 41.1 | 5% |
 
 γ=0.95 chosen for **pedagogy, not raw quality**: V*, learned-trueV, and MC's
-pessimistic V_MC are all clearly separated — the whole point of the room (MC
-*understates* its own policy *and* is suboptimal vs DP). At γ≥0.97 the gaps
-compress and the lesson gets subtle.
+pessimistic V_MC are all clearly separated (41 / 37 / 25) — the whole point of the
+room (MC *understates* its own policy *and* is suboptimal vs DP). The open board
+shrinks the gap vs the old default (9% vs 18%) but keeps the three-way split
+legible; at γ≥0.97 the gaps compress and the lesson gets subtle.
 
 **Episodes** (γ=0.95, decay matched so ε hits floor near the end):
 
-| episodes | trueV | worst seed | success | gap |
+| episodes | trueV | success | worst-seed success | gap |
 |---|---|---|---|---|
-| 500 | 14.8 | 0.0 | 60% | 58% |
-| 1000 | 28.9 | 24.9 | 100% | 19% |
-| 2000 | 29.7 | 24.1 | 100% | 16% |
-| **3000** | **31.7→33.3** | 27.6 | 100% | 11%→6% |
-| 5000 | 34.0 | 32.5 | 100% | 4.5% |
+| 500 | 29.5 | 87% | 0% | 28% |
+| 1000 | 35.0 | 100% | 100% | 15% |
+| 2000 | 37.3 | 100% | 100% | 9% |
+| **3000** | **38.3** | **100%** | **100%** | **7%** |
 
-**ε schedule** (γ=0.95, 3000 episodes):
+**ε schedule** (γ=0.95, 2000 episodes):
 
-| schedule | trueV | std | gap |
-|---|---|---|---|
-| decay 0.9986 | 31.7 | 3.05 | 11% |
-| **decay 0.999** | **33.3** | **1.39** | **6%** |
-| constant 0.10 | 21.3 | 11.5 | 40% |
-| constant 0.30 | 32.6 | 2.62 | 8% |
+| schedule | trueV | gap |
+|---|---|---|
+| decay 0.998 | 37.3 | 9% |
+| **decay 0.999** | **38.3** | **7%** |
+| constant 0.10 | 33.3 | 19% |
+| constant 0.30 | 37.1 | 9% |
 
-- **500 episodes is the failure floor** — some seeds never converge (worst=0).
-  1000+ is reliable; quality keeps climbing to 5000.
-- **Slower decay (0.999) beats faster (0.9986)** at a fixed 3000-episode budget:
-  keeping ε high across the whole run gives better Q-coverage. Match decay to the
-  episode budget so ε reaches its floor near the end.
-- **Constant ε is the instructive failure:** 0.10 is too little exploration to
-  reliably find the goal (80% success, huge variance); 0.30 works but decaying
-  still wins and is safer.
+- **500 episodes is the failure floor** — some seeds still collapse (worst-seed
+  success = 0). 1000+ is reliable; quality keeps climbing toward 3000+.
+- **Slower decay (0.999) beats faster (0.998)** at a fixed budget: keeping ε high
+  across the whole run gives better Q-coverage. Match decay to the episode budget
+  so ε reaches its floor near the end.
+- **Constant ε is the instructive failure:** 0.10 gives the largest value gap
+  (19% — too little exploration to polish the policy); 0.30 matches decaying on
+  value but decaying still edges it and is safer.
 
 ### If you change the environment
 
@@ -246,16 +252,22 @@ grant permanent slip-immunity and expand the state to `(i, j, has_shield)`.
 
 | Param | Range | **Default** | Notes |
 |---|---|---|---|
-| Blocked cells 🧱 | 0–20 | **8** | Safe route always preserved. |
-| Slippery cells 🟦 | 0–40 | **20** | Never on the abyss. |
-| Slip probability | 0.0–0.8 | **0.20** | Raised from 0.10 — makes the ledge genuinely risky. |
+| Blocked cells 🧱 | 0–20 | **15** | Safe route always preserved. |
+| Slippery cells 🟦 | 0–40 | **24** | Never on the abyss. |
+| Slip probability | 0.0–0.8 | **0.40** | Raised to make the ledge genuinely lethal — but with the right schedule SARSA still handles it. |
 | Shields 🛡️ | 0–2 | **1** | Slip-immunity pickup; doubles the state space. |
 | Goal reward 🏁 | — | **100 (fixed)** | Slider **removed**; with the −100 abyss this is a 1:1 escape:die ratio. |
 | Abyss reward | — | −100 (fixed) | |
 
-**Change log:** removed goal-reward slider; raised slip 0.10 → 0.20. Slip 0.30 +
-dense ice drops SARSA to ~66% success (the "flee upward forever" collapse), so
-0.20 is the challenging-but-stable point.
+**Change log:** removed goal-reward slider; board hardened to **15 / 24 / 0.40**
+(walls 8→15, ice 20→24, slip 0.20→0.40). This pushes the room deep into the
+high-slip regime the old default deliberately avoided — but the key finding is
+that **the collapse is schedule-driven, not slip-driven**: at slip 0.40 with
+*low constant ε* (0.05–0.10) SARSA still escapes ~96–99% (worst seed 94%), while
+*decaying-from-1.0* now genuinely collapses seeds to the "flee upward forever"
+policy (mean 87%, **worst seed 0%**). Higher slip simply widens the gap between
+the right schedule (low constant ε) and the wrong one — sharpening the room's
+whole lesson. *(Earlier passes: slip 0.10 → 0.20 → current 0.40.)*
 
 ### Training parameters
 
@@ -267,44 +279,50 @@ dense ice drops SARSA to ~66% success (the "flee upward forever" collapse), so
 | Max steps / episode | 100…500 | **200** |
 | Exploration | **Constant ε** · Decaying | **Constant, ε = 0.10** |
 
-### Best parameters — measured (default board, avg 4–5 seeds vs DP, V*≈52.8)
+### Best parameters — measured (default board 15/24/0.40, 4 layouts × 2 seeds vs DP, V*≈45.7)
 
 The metrics that matter: **training falls** (episodes lost to the abyss),
-**last-100 success**, and the **learned policy's true value** vs V*. The gap to
-V* is *expected and desirable* — it is SARSA's deliberate caution, not
-under-training.
+**last-100 success**, **worst-seed success** (the collapse detector), and the
+**learned policy's true value** vs V*. The gap to V* is *expected and desirable*
+— it is SARSA's deliberate caution, not under-training.
 
-**Exploration schedule is the dominant knob (α=0.10, 2000 ep):**
+**Exploration schedule is the dominant knob (α=0.10, γ=0.95, 2000 ep):**
 
-| schedule | success | falls | trueV | gap to V* |
-|---|---|---|---|---|
-| decaying 1.0→0.05 (0.998) | 100% | 306 | 32.4 | 39% |
-| decaying (0.999, slower) | 72% | 550 | 24.8 | 53% |
-| **constant ε = 0.10** | **96%** | **111** | **39.9** | **24%** |
-| constant ε = 0.05 | 99% | 59 | 42.1 | 20% |
-| constant ε = 0.15 | 95% | 125 | 33.2 | 37% |
-| constant ε = 0.30 | 88% | 272 | 37.7 | 29% |
+| schedule | success | worst seed | falls | trueV | gap to V* |
+|---|---|---|---|---|---|
+| decaying 1.0→0.05 (0.998) | 87% | **0%** | 314 | 24.2 | 47% |
+| constant ε = 0.05 | 99% | 96% | 64 | 37.9 | 17% |
+| **constant ε = 0.10** | **96%** | **94%** | **100** | **36.2** | **21%** |
+| constant ε = 0.15 | 97% | 90% | 137 | 32.4 | 29% |
+| constant ε = 0.30 | 86% | 80% | 318 | 28.7 | 37% |
 
-**Key insight — decaying-from-1.0 is the *worst* choice on a terminal cliff.**
-Pure early exploration means the agent falls constantly and learns the entire
-lower board is lethal, then flees upward. Low **constant** ε keeps it near the
-good path (few falls) while still pricing in a fixed risk, so it stays cautious.
+**Key insight — decaying-from-1.0 is the *worst* choice on a terminal cliff, and
+the harder board makes it fatal.** Pure early exploration means the agent falls
+constantly and learns the entire lower board is lethal, then flees upward; at
+slip 0.40 this now collapses a seed *entirely* (worst-seed success 0%, mean 87%).
+Low **constant** ε keeps it near the good path (few falls) while still pricing in
+a fixed risk, so it stays cautious — and it does not collapse.
 
-**ε is the caution dial:** ε=0.05 gives the best raw value (gap 20%) but SARSA
-then barely differs from Q-learning; ε=0.10 keeps near-best value *and* visible
-caution; ε≥0.15 over-detours. **0.10 is the chosen default** for the
-performance/pedagogy balance.
+**ε is the caution dial:** ε=0.05 gives the best raw value (gap 17%) but SARSA
+then barely differs from Q-learning; ε=0.10 keeps near-best value (gap 21%) *and*
+visible caution; ε≥0.15 over-detours (falls climb, value falls). **0.10 remains
+the chosen default** for the performance/pedagogy balance — but on this harder
+board **ε=0.05 is the best-performing** and the safe floor if you want maximum
+escape (see "if you change the environment").
 
-**α (constant ε=0.10):** 0.10 and 0.30 both reach ~24% gap; α=0.10 is the
-reliable pick (α≥0.20 occasionally collapses a seed to 0). **Episodes:** 2000
-suffices with constant ε; 5000 does not improve it (constant-ε SARSA plateaus).
+**α (constant ε=0.10):** 0.05 / 0.10 / 0.20 all reach ~96–97% success; α=0.10
+gives the best true value (36.2) and is the reliable pick. **Episodes:** 2000
+suffices with constant ε; 5000 barely improves it (gap 21%→18%, but 2× the falls)
+— constant-ε SARSA plateaus.
 
 ### If you change the environment
 
-- **Higher slip (≥0.3) or denser ice:** raises fall risk — **lower ε further
-  (0.05–0.08)** to avoid the flee-upward collapse, and/or add a **shield** so the
-  agent can buy slip-immunity. If it still collapses, the board is past SARSA's
-  comfort zone; drop slip back.
+- **Even higher slip (≥0.5) or denser ice** (the default is already slip 0.40):
+  raises fall risk further — **lower ε to 0.05** (the safe floor here) to avoid
+  the flee-upward collapse, and/or add a **shield** so the agent can buy
+  slip-immunity. Never use decaying ε in this regime — it collapses seeds. If it
+  still collapses at ε=0.05, the board is past SARSA's comfort zone; drop slip
+  back.
 - **Want maximum escape performance (not the caution lesson):** ε=0.05 constant,
   α=0.10 — closest to optimal here.
 - **Want to *exaggerate* the SARSA-vs-Q-learning contrast:** raise ε to 0.20–0.30
@@ -330,15 +348,26 @@ ledge. State is `(i, j, guard_phase, coin_mask)` — P=14 phases × 2 masks, so
 
 | Param | Range | **Default** | Notes |
 |---|---|---|---|
-| Blocked cells 🧱 | 0–20 | **8** | Safe detour always preserved. |
-| Slippery cells 🟦 | 0–40 | **20** | |
-| Slip probability | 0.0–0.8 | **0.20** | Raised from 0.10 (matches Room 3). |
+| Blocked cells 🧱 | 0–20 | **15** | Safe detour always preserved. |
+| Slippery cells 🟦 | 0–40 | **30** | |
+| Slip probability | 0.0–0.8 | **0.30** | Raised — but note this **muddies the coin contrast** (see caution below). |
 | Coin value 🪙 | 0–20 | **5** | **The contrast dial** — see below. Slider kept. |
 | Goal reward 🏁 | — | **100 (fixed)** | Slider **removed**. |
 | Fall / Catch | — | −100 (fixed) | |
 
-**Change log:** removed goal-reward slider; slip 0.10 → 0.20. Coin-value slider
-kept (it is the pedagogical control).
+**Change log:** removed goal-reward slider; board hardened to **15 / 30 / 0.30**
+(walls 8→15, ice 20→30, slip 0.20→0.30).
+
+> ⚠️ **Caution — this bump blurs Room 4's lesson (opposite of Room 3).** Measured
+> on the new board (decaying ε, coin=5, 20k ep, 3 layouts × 2 seeds): both
+> learners drop to ~83% success (from ~87/98%), falls explode (Q-learning ~5955,
+> SARSA ~1960 per 20k), and true values fall (Q ~27, SARSA ~19.5, from ~39/28).
+> **The clean coin contrast degrades:** the exact-optimal DP itself now takes the
+> coin on only ~1/3 layouts (coin placement + slip noise vary board to board), so
+> "Q-learning over-takes / SARSA skips" no longer reads crisply (Q 2/6, SARSA 1/6
+> runs). SARSA's *caution signature survives* (it still falls ~3× less), but if you
+> want the sharp signature lesson, **keep slip ≤ 0.20**. Best-params below are
+> unchanged; they were measured on the earlier lower-slip board.
 
 ### Training parameters
 

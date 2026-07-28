@@ -232,11 +232,11 @@ GOAL_REWARD = 100.0  # fixed across all rooms; with the -100 abyss this is a 1:1
 
 def _env_controls():
     st.markdown("##### 🎮 Environment & Physics")
-    n_blocked = st.slider("Blocked cells 🧱", 0, 20, 8,
+    n_blocked = st.slider("Blocked cells 🧱", 0, 20, 15,
         help="Impassable walls. A safe route avoiding the abyss and ledge is always preserved.")
-    n_slippery = st.slider("Slippery cells 🟦", 0, 40, 20,
+    n_slippery = st.slider("Slippery cells 🟦", 0, 40, 24,
         help="Ice cells where movement may slide sideways. Never placed on the abyss.")
-    slip = st.slider("Slip probability", 0.0, 0.8, 0.20, 0.05,
+    slip = st.slider("Slip probability", 0.0, 0.8, 0.4, 0.05,
         help="Chance of sliding perpendicular to the intended direction on ice. At 0, all detour caution is driven purely by SARSA's exploration risk. Above ~0.3 with dense ice, SARSA can learn the whole lower board is lethal and flee upward.")
     n_shields = st.slider("Shields 🛡️", 0, 2, 1,
         help="Pickups that grant permanent immunity to slipping. A strategic tradeoff: immunity vs. the discounting cost of detouring to grab it.")
@@ -294,7 +294,7 @@ def render():
     st.markdown("### Room 3 · SARSA")
     st.caption("Cross the slippery ice ledge over the abyss — and do not fall in.")
     
-    with st.expander("ℹ️ About this room", expanded=True):
+    with st.expander("ℹ️ About this room", expanded=False):
         st.markdown(
             "SARSA is an **on-policy** Temporal Difference control algorithm that learns from every step.\n\n"
             "* **Step-by-Step Learning:** It updates $Q(s,a)$ toward $r + \\gamma Q(s',a')$ using the *actual* next action $a'$, including $\\epsilon$-greedy exploration noise.\n"
