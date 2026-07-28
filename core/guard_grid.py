@@ -73,20 +73,31 @@ CLIFF_REWARD = -100.0
 CAUGHT_REWARD = -100.0
 
 
-def make_track(col: int = GUARD_COL, rows=GUARD_ROWS):
+def make_track(pattern: str = "column", col: int = GUARD_COL, rows=GUARD_ROWS,
+               seed: int | None = None):
     """The guard's patrol as a cyclic sequence of cells.
 
-    Sweeps `rows` of `col` top→bottom then back, so the period is
-    `2·len(rows) − 2` (the two turn-around cells are not repeated). For rows 0–7
-    that is P = 14. The guard advances one cell per environment step.
+    The default "column" patrol sweeps `rows` of `col` top→bottom then back.
+    Alternate patterns add more dynamic motion so the agent cannot rely on a
+    fixed single-column crossing.
 
-    The FULL column matters: measured, any patrol that leaves a row permanently
-    unoccupied (a shorter sweep, or a "faster" guard that skips rows) hands the
-    agent a free crossing and the guard stops mattering. See Plan.md §Room 4.
+    The full track is cyclic: the returned tuple is repeated by advancing the
+    guard phase, and the last phase leads back to the first.
     """
-    rows = list(rows)
-    path = rows + rows[-2:0:-1]     # 0..7, 6..1  → no repeated endpoints
-    return tuple((r, col) for r in path)
+    if pattern == "column":
+        rows = list(rows)
+        path = [(r, col) for r in rows]
+    elif pattern == "loop":
+        path = [(0, col), (0, col + 2), (4, col + 2), (4, col)]
+    elif pattern == "zigzag":
+        rows = list(rows)
+        path = [(r, col - 2 if r % 2 == 0 else col + 2) for r in rows]
+    else:
+        raise ValueError(f"Unknown guard track pattern: {pattern}")
+
+    if len(path) == 1:
+        return tuple(path)
+    return tuple(path + path[-2:0:-1])
 
 
 class GuardGrid:
