@@ -153,10 +153,10 @@ def _env_controls():
         help="Discs (0.5 m each) — one is always the central pillar, the rest placed "
              "randomly every episode, always leaving a traversable path.")
     c3, c4 = st.columns(2)
-    obstacle_speed = c3.slider("Dynamic-obstacle speed (m/s)", 0.0, 1.5, 0.0, 0.1,
-        help="0 = static (default). Above 0, the non-central obstacles drift and bounce "
-             "(the central pillar stays put) — each lit obstacle's velocity is added to "
-             "the observation so the network can tell approaching from receding.")
+    obstacle_speed = c3.slider("Dynamic-obstacle speed (m/s)", 0.0, 1.5, 0.5, 0.1,
+        help="Default 0.5 — the non-central obstacles drift and bounce (the central pillar "
+             "stays put), and each lit obstacle's velocity is added to the observation so the "
+             "network can tell approaching from receding. Set 0 for static obstacles.")
     friction = c4.slider("Ice friction μ (per second)", 0.2, 0.9, 0.5, 0.05,
         help="Velocity retained per second (momentum carries between steps). Lower = "
              "more drag/grip; higher = more slide. Thrust is tuned to beat friction so "
@@ -178,8 +178,8 @@ def _algo_row():
         help="A larger, partially-observed input needs more episodes than Room 5. "
              "Training shows a live progress bar (~90 s; ~80% escape on unseen layouts "
              "by 1,200 at the defaults).")
-    gamma = c2.slider("Discount γ", 0.50, 0.99, 0.95, 0.01,
-        help="Weight on future reward. The exit is ~13 m away, so keep γ fairly high.")
+    gamma = c2.slider("Discount γ", 0.50, 0.99, 0.90, 0.01,
+        help="Weight on future reward. The exit is ~13 m away, so keep γ fairly high (0.90 app-wide default; 0.95 also works well here).")
     lr = c3.select_slider("Adam learning rate", [1e-4, 3e-4, 1e-3, 3e-3], 3e-4,
         format_func=lambda v: f"{v:.0e}",
         help="Optimizer step size. 3e-4 is the stable Room 5 default.")
@@ -202,7 +202,7 @@ def _algo_row():
         eps_params = (
             d1.slider("ε start", 0.1, 1.0, 1.0, 0.05, help="Exploration rate at episode 0."),
             d2.slider("ε minimum", 0.0, 0.5, 0.05, 0.01, help="Lower bound on ε."),
-            d3.slider("ε decay", 0.980, 0.9999, 0.995, 0.0005, format="%.4f",
+            d3.slider("ε decay", 0.980, 0.9999, 0.998, 0.0005, format="%.4f",
                       help="Per-episode multiplier: ε = max(min, start × decay^k)."),
         )
     else:

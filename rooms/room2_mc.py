@@ -206,32 +206,34 @@ def _epsilon_curve(eps, view_ep):
 # ----------------------------------------------------------------------------- #
 # Controls
 # ----------------------------------------------------------------------------- #
+GOAL_REWARD = 100.0  # fixed across all rooms (project convention)
+
+
 def _env_controls():
     st.markdown("##### 🎮 Environment & Physics")
-    n_blocked = st.slider("Blocked cells 🧱", 0, 30, 20,
+    n_blocked = st.slider("Blocked cells 🧱", 0, 30, 22,
         help="Impassable walls that form corridors. A valid path to the exit is always preserved.")
-    n_slippery = st.slider("Slippery cells 🟦", 0, 40, 20,
+    n_slippery = st.slider("Slippery cells 🟦", 0, 40, 25,
         help="Ice cells where movement may slide sideways.")
-    slip = st.slider("Slip probability", 0.0, 0.8, 0.2, 0.05,
+    slip = st.slider("Slip probability", 0.0, 0.8, 0.35, 0.05,
         help="Chance of sliding perpendicular to the intended direction on ice.")
-    n_portals = st.slider("Portal traps 🌀", 0, 5, 3,
+    n_portals = st.slider("Portal traps 🌀", 0, 5, 4,
         help="Traps that teleport the agent back to the start. No point penalty, but costs time (discounted by γ).")
-    goal_reward = st.slider("Goal reward 🏁", 10, 1000, 100, 10,
-        help="Reward for reaching the exit. All learned values scale relative to this number.")
     regen = st.button("🎲 Regenerate layout", use_container_width=True,
         help="Generate a new layout with the selected cell counts.")
     return {"slip": slip, "n_blocked": n_blocked, "n_slippery": n_slippery,
-            "n_portals": n_portals, "goal_reward": goal_reward, "regen": regen}
+            "n_portals": n_portals, "goal_reward": GOAL_REWARD, "regen": regen}
 
 
 def _algo_row():
     st.markdown("##### 🧠 Algorithm")
     c1, c2, c3 = st.columns(3)
     gamma = c1.slider("Discount factor γ", 0.50, 0.99, 0.90, 0.01,
-        help="Higher values value future rewards more. This determines how much portals 'hurt' by delaying the goal.")
+        help="Higher values value future rewards more. This determines how much portals 'hurt' by delaying the goal. "
+             "0.95 keeps V*, the learned policy's true value, and MC's pessimistic estimate best separated (0.90 is the app-wide default).")
     episodes = c2.select_slider("Training episodes",
-        [100, 250, 500, 1000, 2000, 3000, 5000], value=2000,
-        help="Number of complete episodes sampled. Too few episodes prevent the agent from ever finding the exit.")
+        [500, 1000, 2000, 5000, 10000], value=2000,
+        help="Number of complete episodes sampled. Below ~1000 some seeds never converge; quality keeps improving toward 10000.")
     max_steps = c3.select_slider("Max steps per training episode",
         [50, 100, 200, 300, 400, 500], value=300,
         help="Step cap per episode. Must be generous enough early on for random walks to find the exit.")
@@ -252,7 +254,8 @@ def _algo_row():
                 help="The floor ε never drops below.")
             decay = d3.slider("ε decay rate", 0.990, 0.9999, 0.998, 0.0001,
                 format="%.4f",
-                help="Per-episode multiplier. Lower = faster commitment to greedy actions.")
+                help="Per-episode multiplier. Lower = faster commitment to greedy actions. "
+                     "Match it to the episode budget so ε reaches its floor near the end (0.998 ≈ 2000 episodes).")
             eps_params = (eps_start, eps_min, decay)
 
     train = st.button("🚀 Train", type="primary", use_container_width=True)
@@ -370,7 +373,7 @@ def render():
         results_caption = st.empty()
     with res_ctrl_col:
         st.markdown("**▶️ Play** — greedy, ε = 0")
-        play_max_steps = st.slider("Max steps per episode", 10, 500, 200,
+        play_max_steps = st.slider("Max steps per episode", 10, 50, 50,
             help="Step cap for this test rollout.")
         speed = st.select_slider("Animation speed", ["Slow", "Normal", "Fast"], "Normal")
         play = st.button("▶️ Play Episode", type="primary", use_container_width=True,

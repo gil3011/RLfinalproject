@@ -261,23 +261,24 @@ def _steps_curve(steps_ql, steps_sa, view_ep):
 # ----------------------------------------------------------------------------- #
 # Controls
 # ----------------------------------------------------------------------------- #
+GOAL_REWARD = 100.0  # fixed across all rooms; balances the -100 fall/catch penalties
+
+
 def _env_controls():
     st.markdown("##### 🎮 Environment & Physics")
     n_blocked = st.slider("Blocked cells 🧱", 0, 20, 8,
         help="Impassable walls. A safe detour avoiding the cliff edge is always preserved.")
     n_slippery = st.slider("Slippery cells 🟦", 0, 40, 20,
         help="Ice cells where movement may slide sideways into hazards.")
-    slip = st.slider("Slip probability", 0.0, 0.8, 0.1, 0.05,
+    slip = st.slider("Slip probability", 0.0, 0.8, 0.20, 0.05,
         help="Chance of sliding perpendicular to the intended direction on ice.")
     coin_value = st.slider("Coin value 🪙", 0, 20, 5, 1,
-        help="Bonus reward for collecting the ledge coin. Higher values tempt the optimal policy onto the ledge.")
-    goal_reward = st.slider("Goal reward 🏁", 10, 1000, 100, 10,
-        help="Reward for reaching the exit. Sets the baseline scale against the -100 fall/catch penalties and coin value.")
-    st.caption(f"🕳️ Falls and 🚨 guard catches each score a flat **{LOSS_SCORE:+.0f}** on the scoreboard.")
+        help="Bonus reward for the ledge coin — the key contrast dial. At the default 5, exact-optimal DP SKIPS the coin but Q-learning greedily takes it (over-optimism); at ~8+ the coin is genuinely worth it and the contrast fades.")
+    st.caption(f"🕳️ Falls and 🚨 guard catches each score a flat **{LOSS_SCORE:+.0f}** on the scoreboard; the exit scores **{GOAL_REWARD:+.0f}**.")
     regen = st.button("🎲 Regenerate layout", use_container_width=True,
         help="Reshuffle walls, ice, and the coin. The abyss, guard patrol, and endpoints never move.")
     return {"n_blocked": n_blocked, "n_slippery": n_slippery, "slip": slip,
-            "coin_value": float(coin_value), "goal_reward": float(goal_reward),
+            "coin_value": float(coin_value), "goal_reward": GOAL_REWARD,
             "regen": regen}
 
 
@@ -288,11 +289,12 @@ def _algo_row():
     c1, c2, c3, c4 = st.columns(4)
     alpha = c1.slider("Learning rate α", 0.01, 0.5, 0.10, 0.01,
         help="Step size. Controls how quickly Q-values adapt to new step experiences.")
-    gamma = c2.slider("Discount factor γ", 0.50, 0.99, 0.95, 0.01,
+    gamma = c2.slider("Discount factor γ", 0.50, 0.99, 0.90, 0.01,
         help="Higher values value future rewards more, increasing the reach of the distant exit and coin.")
-    episodes = c3.select_slider("Training episodes", [5000, 10000, 20000, 50000],
-        value=20000,
-        help="Training runs per learner. Needs ~20k episodes to reliably cover the larger state space (guard phase × coin).")
+    episodes = c3.select_slider("Training episodes", [500, 1000, 2000, 5000, 10000],
+        value=2000,
+        help="Training runs per learner. NOTE: this room's state space (guard phase × coin) is large — "
+             "the SARSA-vs-Q-learning contrast is far cleaner at 10000+; 2000 under-trains both learners.")
     max_steps = c4.select_slider("Max steps per training episode", [100, 200, 300, 500],
         value=200, help="Step limit per training episode.")
 
@@ -310,9 +312,10 @@ def _algo_row():
                 help="Exploration rate at episode 1 (1.0 = pure random exploration).")
             eps_min = d2.slider("ε minimum", 0.0, 0.5, 0.05, 0.01,
                 help="The floor ε never drops below.")
-            decay = d3.slider("ε decay rate", 0.990, 0.9999, 0.9995, 0.0001,
+            decay = d3.slider("ε decay rate", 0.990, 0.9999, 0.998, 0.0001,
                 format="%.4f",
-                help="Per-episode multiplier. Slower decay keeps exploration alive longer for the expanded state space.")
+                help="Per-episode multiplier. Slower decay keeps exploration alive longer for the expanded state space. "
+                     "At higher episode budgets raise this toward 0.9995 so ε stays alive across the run.")
             eps_params = (eps_start, eps_min, decay)
 
     train = st.button("🚀 Train both", type="primary", use_container_width=True)
@@ -458,7 +461,7 @@ def render():
         results_caption = st.empty()
     with res_ctrl_col:
         st.markdown(f"**▶️ Play** — {viewed}, greedy (ε = 0)")
-        play_max_steps = st.slider("Max steps per episode", 10, 500, 200,
+        play_max_steps = st.slider("Max steps per episode", 10, 50, 50,
             help="Step limit for this test rollout.")
         speed = st.select_slider("Animation speed", ["Slow", "Normal", "Fast"], "Normal")
         play = st.button("▶️ Play Episode", type="primary", use_container_width=True,

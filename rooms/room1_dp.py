@@ -142,25 +142,27 @@ def _convergence_curve(deltas, view_it):
 # ----------------------------------------------------------------------------- #
 # Controls
 # ----------------------------------------------------------------------------- #
+GOAL_REWARD = 100  # fixed across all rooms (project convention)
+
+
 def _env_controls():
     st.markdown("##### 🎮 Environment & Physics")
-    n_blocked = st.slider("Blocked cells 🧱", 0, 20, 8,
+    n_blocked = st.slider("Blocked cells 🧱", 0, 20, 10,
         help="Impassable walls. A valid path to the exit is always preserved.")
-    n_slippery = st.slider("Slippery cells 🟦", 0, 40, 15,
-        help="Ice cells where movement may slide sideways.")
-    slip = st.slider("Slip probability", 0.0, 0.8, 0.2, 0.05,
+    n_slippery = st.slider("Slippery cells 🟦", 0, 40, 30,
+        help="Ice cells where movement may slide sideways. Dense ice forces the "
+             "optimal policy to weigh a risky shortcut against a longer dry detour.")
+    slip = st.slider("Slip probability", 0.0, 0.8, 0.35, 0.05,
         help="Chance of sliding perpendicular to the intended direction on ice.")
-    n_negative = st.slider("Negative-reward cells 🟥", 0, 15, 6,
+    n_negative = st.slider("Negative-reward cells 🟥", 0, 15, 8,
         help="Passable penalty cells that reduce return when entered.")
-    neg_reward = st.slider("Negative reward value", -10, -1, -5,
+    neg_reward = st.slider("Negative reward value", -10, -1, -6,
         help="Reward penalty applied when entering a red cell.")
-    goal_reward = st.slider("Goal reward 🏁", 10, 1000, 100, 10,
-        help="Reward for reaching the exit. Higher values encourage riskier, faster paths.")
     regen = st.button("🎲 Regenerate layout", use_container_width=True,
         help="Generate a new layout with the selected cell counts.")
     return {
         "n_blocked": n_blocked, "n_slippery": n_slippery, "n_negative": n_negative,
-        "slip": slip, "neg_reward": neg_reward, "goal_reward": goal_reward,
+        "slip": slip, "neg_reward": neg_reward, "goal_reward": GOAL_REWARD,
         "regen": regen,
     }
 
@@ -170,7 +172,9 @@ def _algo_row():
     a1, a2 = st.columns(2)
     algo = a1.selectbox("DP method", list(ALGORITHMS.keys()))
     gamma = a2.slider("Discount factor γ", 0.50, 0.99, 0.90, 0.01,
-        help="Higher values plan further ahead; lower values favor immediate rewards.")
+        help="Higher values plan further ahead; lower values favor immediate rewards. "
+             "Below ~0.8 the goal reward is discounted to near-0 over the long path and "
+             "the value signal vanishes; 0.95 gives the richest value diffusion (0.90 is the app-wide default).")
     train = st.button("🚀 Train", type="primary", use_container_width=True)
     return algo, gamma, train
 

@@ -227,24 +227,25 @@ def _steps_curve(steps, success, view_ep):
 # ----------------------------------------------------------------------------- #
 # Controls
 # ----------------------------------------------------------------------------- #
+GOAL_REWARD = 100.0  # fixed across all rooms; with the -100 abyss this is a 1:1 escape:die ratio
+
+
 def _env_controls():
     st.markdown("##### 🎮 Environment & Physics")
     n_blocked = st.slider("Blocked cells 🧱", 0, 20, 8,
         help="Impassable walls. A safe route avoiding the abyss and ledge is always preserved.")
     n_slippery = st.slider("Slippery cells 🟦", 0, 40, 20,
         help="Ice cells where movement may slide sideways. Never placed on the abyss.")
-    slip = st.slider("Slip probability", 0.0, 0.8, 0.1, 0.05,
-        help="Chance of sliding perpendicular to the intended direction on ice. At 0, all detour caution is driven purely by SARSA's exploration risk.")
+    slip = st.slider("Slip probability", 0.0, 0.8, 0.20, 0.05,
+        help="Chance of sliding perpendicular to the intended direction on ice. At 0, all detour caution is driven purely by SARSA's exploration risk. Above ~0.3 with dense ice, SARSA can learn the whole lower board is lethal and flee upward.")
     n_shields = st.slider("Shields 🛡️", 0, 2, 1,
         help="Pickups that grant permanent immunity to slipping. A strategic tradeoff: immunity vs. the discounting cost of detouring to grab it.")
-    goal_reward = st.slider("Goal reward 🏁", 10, 1000, 100, 10,
-        help="Reward for reaching the exit. All learned values scale relative to this and the fixed -100 fall penalty.")
-    st.caption(f"🕳️ Abyss falls score **{CLIFF_REWARD:+.0f}**, so this slider sets the reward ratio between escaping and dying.")
+    st.caption(f"🕳️ Abyss falls score **{CLIFF_REWARD:+.0f}** and the exit scores **{GOAL_REWARD:+.0f}** — a 1:1 escape-vs-die ratio.")
     regen = st.button("🎲 Regenerate layout", use_container_width=True,
         help="Reshuffle walls, ice, and shields. The abyss, start, and exit never move.")
     return {"n_blocked": n_blocked, "n_slippery": n_slippery,
             "n_shields": n_shields, "slip": slip,
-            "goal_reward": float(goal_reward), "regen": regen}
+            "goal_reward": GOAL_REWARD, "regen": regen}
 
 
 def _algo_row():
@@ -252,7 +253,7 @@ def _algo_row():
     c1, c2, c3, c4 = st.columns(4)
     alpha = c1.slider("Learning rate α", 0.01, 0.5, 0.10, 0.01,
         help="Step size. Controls how quickly Q-values adapt to new step experiences.")
-    gamma = c2.slider("Discount factor γ", 0.50, 0.99, 0.95, 0.01,
+    gamma = c2.slider("Discount factor γ", 0.50, 0.99, 0.90, 0.01,
         help="Higher values plan further ahead; lower values make immediate safety preferable to distant rewards.")
     episodes = c3.select_slider("Training episodes",
         [500, 1000, 2000, 5000, 10000], value=2000,
@@ -263,11 +264,13 @@ def _algo_row():
 
     e1, e2 = st.columns([1, 3])
     eps_kind = e1.selectbox("Exploration", [DECAYING, CONSTANT],
-        help="Decaying explores early then commits; Constant maintains a fixed chance of random moves forever.")
+        help="Decaying explores early then commits; Constant maintains a fixed chance of random moves forever. "
+             "NOTE: on this terminal cliff, low CONSTANT ε (≈0.10) actually learns best — decaying from 1.0 causes "
+             "constant early falls that teach the agent the lower board is lethal. Try switching to Constant here.")
     with e2:
         if eps_kind == CONSTANT:
-            eps = st.slider("ε", 0.01, 0.5, 0.30, 0.01,
-                help="Fixed chance of taking a random move. SARSA prices this risk directly into its path planning.")
+            eps = st.slider("ε", 0.01, 0.5, 0.10, 0.01,
+                help="Fixed chance of taking a random move. SARSA prices this risk directly into its path planning — higher ε = more caution (bigger detour), lower ε = closer to Q-learning's risky optimal.")
             eps_params = (eps,)
         else:
             d1, d2, d3 = st.columns(3)
@@ -417,7 +420,7 @@ def render():
         results_caption = st.empty()
     with res_ctrl_col:
         st.markdown("**▶️ Play** — greedy, ε = 0")
-        play_max_steps = st.slider("Max steps per episode", 10, 500, 200,
+        play_max_steps = st.slider("Max steps per episode", 10, 50, 50,
             help="Step limit for this test rollout.")
         speed = st.select_slider("Animation speed", ["Slow", "Normal", "Fast"], "Normal")
         play = st.button("▶️ Play Episode", type="primary", use_container_width=True,
