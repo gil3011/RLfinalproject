@@ -24,9 +24,9 @@ _QL, _SA = "Q-learning", "SARSA"
 _QL_COLOR, _SA_COLOR = "#dc2626", "#2563eb"
 
 
-def _make_grid(blocked, ice, coin, slip, goal_reward, coin_value, seed=None):
+def _make_grid(blocked, ice, coin, slip, goal_reward, coin_value, pattern="column", seed=None):
     return GuardGrid(
-        blocked=blocked, ice=ice, coins=coin, track=make_track(), slip=slip,
+        blocked=blocked, ice=ice, coins=coin, track=make_track(pattern=pattern), slip=slip,
         goal_reward=goal_reward, coin_value=coin_value,
         rng=np.random.default_rng(seed))
 
@@ -35,10 +35,10 @@ def _make_grid(blocked, ice, coin, slip, goal_reward, coin_value, seed=None):
 # Cached compute
 # ----------------------------------------------------------------------------- #
 @st.cache_data(show_spinner=False)
-def _train(kind, blocked_t, ice_t, coin_t, slip, goal_reward, coin_value, gamma,
+def _train(kind, blocked_t, ice_t, coin_t, slip, goal_reward, coin_value, pattern, gamma,
            alpha, episodes, max_steps, eps_kind, eps_params, seed):
     grid = _make_grid(set(blocked_t), set(ice_t), coin_t, slip, goal_reward,
-                      coin_value, seed)
+                      coin_value, pattern=pattern, seed=seed)
     control = q_learning_control if kind == _QL else sarsa_control
     _, _, history, stats = control(
         grid, gamma=gamma, alpha=alpha, n_episodes=episodes, max_steps=max_steps,
@@ -47,28 +47,30 @@ def _train(kind, blocked_t, ice_t, coin_t, slip, goal_reward, coin_value, gamma,
 
 
 @st.cache_data(show_spinner=False)
-def _dp_optimal(blocked_t, ice_t, coin_t, slip, goal_reward, coin_value, gamma):
-    grid = _make_grid(set(blocked_t), set(ice_t), coin_t, slip, goal_reward, coin_value)
+def _dp_optimal(blocked_t, ice_t, coin_t, slip, goal_reward, coin_value, pattern, gamma):
+    grid = _make_grid(set(blocked_t), set(ice_t), coin_t, slip, goal_reward, coin_value, pattern=pattern)
     V, policy, _ = value_iteration(grid, gamma=gamma)
     return V, policy
 
 
 @st.cache_data(show_spinner=False)
 def _learned_policy_value(blocked_t, ice_t, coin_t, slip, goal_reward, coin_value,
-                          gamma, policy_t):
-    grid = _make_grid(set(blocked_t), set(ice_t), coin_t, slip, goal_reward, coin_value)
+                          pattern, gamma, policy_t):
+    grid = _make_grid(set(blocked_t), set(ice_t), coin_t, slip, goal_reward, coin_value, pattern=pattern)
     return policy_value(grid, dict(policy_t), gamma)
 
 
 def _regenerate_layout(env, seed, version):
     coin = place_coin(seed)
-    track = set(make_track())
+    pattern = env["guard_pattern"].split()[0].lower()
+    track = set(make_track(pattern=pattern))
     blocked, ice, _ = generate_layout(
         env["n_blocked"], env["n_slippery"], 0, seed, start=START, goal=GOAL,
         exclude=set(CLIFF) | track | set(coin), pits=set(CLIFF) | set(LEDGE))
     st.session_state["room4_layout"] = {
         "blocked": blocked, "ice": ice, "coin": coin, "version": version,
         "counts": (env["n_blocked"], env["n_slippery"]),
+        "pattern": pattern,
     }
 
 
@@ -240,14 +242,16 @@ def _env_controls():
         help="Ice cells where movement may slide sideways into hazards.")
     slip = st.slider("Slip probability", 0.0, 0.8, 0.3, 0.05,
         help="Chance of sliding perpendicular to the intended direction on ice.")
+    guard_pattern = st.selectbox("Guard patrol pattern", ["Column patrol", "Loop patrol", "Zigzag patrol"],
+        help="Choose whether the guard sweeps a fixed column, loops a small rectangle, or zig-zags between two columns.")
     coin_value = st.slider("Coin value 🪙", 0, 20, 5, 1,
         help="Bonus reward for the ledge coin — the key contrast dial. At the default 5, exact-optimal DP SKIPS the coin but Q-learning greedily takes it (over-optimism); at ~8+ the coin is genuinely worth it and the contrast fades.")
     st.caption(f"🕳️ Falls and 🚨 guard catches each score a flat **{LOSS_SCORE:+.0f}** on the scoreboard; the exit scores **{GOAL_REWARD:+.0f}**.")
     regen = st.button("🎲 Regenerate layout", use_container_width=True,
         help="Reshuffle walls, ice, and the coin. The abyss, guard patrol, and endpoints never move.")
     return {"n_blocked": n_blocked, "n_slippery": n_slippery, "slip": slip,
-            "coin_value": float(coin_value), "goal_reward": GOAL_REWARD,
-            "regen": regen}
+            "guard_pattern": guard_pattern, "coin_value": float(coin_value),
+            "goal_reward": GOAL_REWARD, "regen": regen}
 
 
 def _algo_row():
@@ -302,6 +306,7 @@ def render():
             "Q-Learning is an **off-policy** Temporal Difference control algorithm that learns differently from Room 3's SARSA.\n\n"
             "* **Off-Policy Bootstrapping:** Q-learning updates toward $\\max_a Q(s',a)$ — assuming optimal future play without random exploration. From afar, the cliff ledge looks safe and the coin looks free.\n"
             "* **The Guard & Coin Setup:** A patrol guard $\\text{🚨}$ sweeps the safe upper detour (catching you is terminal), while a bonus coin $\\text{🪙}$ sits on the ledge. Both algorithms train on the exact same board.\n"
+            "* **Guard Route Patterns:** You can now choose the guard's patrol style — fixed column, loop, or zigzag — so the danger can shift and the agent must learn a more dynamic timing strategy.\n"
             "* **The Cliff-Walking Signature:** Q-learning aggressively walks the ledge to grab the coin, falling into the abyss far more often during training. SARSA prices in its own exploration noise ($\epsilon$) and detours safely.\n"
             "* **Usage:** Configure physics -> **🚀 Train both** -> Scrub the guard phase to see dynamic pathing -> Compare the learning curves below."
         )
@@ -325,8 +330,9 @@ def render():
     layout = st.session_state["room4_layout"]
     blocked, ice, coin = layout["blocked"], layout["ice"], layout["coin"]
     coin_cell = coin[0] if coin else None
+    pattern = env["guard_pattern"].split()[0].lower()
     grid = _make_grid(blocked, ice, coin, env["slip"], env["goal_reward"],
-                      env["coin_value"])
+                      env["coin_value"], pattern=pattern)
 
     setup_board.plotly_chart(
         _figure(grid, {}, {}, show_arrows=False, phase=0, mask=0, coin_cell=coin_cell),
@@ -342,7 +348,7 @@ def render():
     gamma, alpha, episodes, max_steps, eps_kind, eps_params, train = _algo_row()
 
     sig = (layout["version"], env["slip"], env["goal_reward"], env["coin_value"],
-           gamma, alpha, episodes, max_steps, eps_kind, eps_params)
+           env["guard_pattern"], gamma, alpha, episodes, max_steps, eps_kind, eps_params)
     if train:
         st.session_state["room4_trained_sig"] = sig
     if st.session_state.get("room4_trained_sig") != sig:
@@ -351,12 +357,13 @@ def render():
     # --- Row 3: training results -------------------------------------------- #
     keys = (tuple(sorted(blocked)), tuple(sorted(ice)), coin)
     common = (env["slip"], env["goal_reward"], env["coin_value"])
+    pattern = env["guard_pattern"].split()[0].lower()
     with st.spinner(f"Training SARSA and Q-learning ({episodes:,} episodes each)…"):
-        hist_ql, stats_ql = _train(_QL, *keys, *common, gamma, alpha, episodes,
+        hist_ql, stats_ql = _train(_QL, *keys, *common, pattern, gamma, alpha, episodes,
                                    max_steps, eps_kind, eps_params, 0)
-        hist_sa, stats_sa = _train(_SA, *keys, *common, gamma, alpha, episodes,
+        hist_sa, stats_sa = _train(_SA, *keys, *common, pattern, gamma, alpha, episodes,
                                    max_steps, eps_kind, eps_params, 0)
-        V_star, pi_star = _dp_optimal(*keys, *common, gamma)
+        V_star, pi_star = _dp_optimal(*keys, *common, pattern, gamma)
 
     if not hist_ql:
         st.warning("No episodes were run.")
@@ -393,7 +400,8 @@ def render():
     V = _project(grid, V_s, phase, mask)
     policy = _project(grid, policy_s, phase, mask)
 
-    v_learned = _learned_policy_value(*keys, *common, gamma,
+    pattern = env["guard_pattern"].split()[0].lower()
+    v_learned = _learned_policy_value(*keys, *common, pattern, gamma,
                                       tuple(sorted(policy_s.items())))[s0]
 
     n_goal = int(stats["success"].sum())
