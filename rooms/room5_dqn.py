@@ -255,9 +255,8 @@ def render():
     esc, caught, timeout = stats["escaped"], stats["caught"], stats["timeout"]
     last = slice(-100, None)
     escape_rate = 100 * esc[last].mean()
-    steps_ok = stats["steps"][esc]
-    mean_steps = steps_ok.mean() if steps_ok.size else float("nan")
-    mean_q = stats["q_pred"][-200:].mean() if stats["q_pred"].size else float("nan")
+    mean_steps = stats["steps"][-100:].mean() if stats["steps"].size else float("nan")
+    mean_reward = stats["returns"][-100:].mean() if stats["returns"].size else float("nan")
 
     # ── Row 3 — training results ──
     # ... [keep calculation code identical] ...
@@ -269,10 +268,10 @@ def render():
               help="Total training episodes terminated by enemy contact.")
     k3.metric("⏱️ Timed out (training)", f"{int(timeout.sum()):,}",
               help="Episodes reaching the step limit. Scored as −100 for display, but unpenalized during training.")
-    k4.metric("Mean steps to exit", f"{mean_steps:.1f}" if steps_ok.size else "—",
-              help="Average distance traveled on successful escapes (1 step = 1 m).")
-    k5.metric("Mean predicted Q", f"{mean_q:.2f}" if stats["q_pred"].size else "—",
-              help="The network's average value estimate over the last 200 training steps.")
+    k4.metric("Last 100 mean steps per episode", f"{mean_steps:.1f}" if stats["steps"].size else "—",
+              help="Average steps per episode over the last 100 training episodes (1 step = 1 m).")
+    k5.metric("Last 100 mean reward", f"{mean_reward:.1f}" if stats["returns"].size else "—",
+              help="Average undiscounted episode reward over the last 100 training episodes (scoreboard scale, ±100).")
 
     # view controls
     cps = bundle["checkpoints"]
@@ -401,15 +400,15 @@ def _graphs(stats):
             fig.add_trace(go.Scatter(x=gs, y=stats["loss"], mode="lines",
                                      line=dict(color="#e67e22", width=1), name="TD loss"))
             fig.add_trace(go.Scatter(x=gs, y=stats["q_pred"], mode="lines",
-                                     line=dict(color="#8e44ad", width=1), name="mean Q",
+                                     line=dict(color="#8e44ad", width=1), name="mean predicted reward",
                                      yaxis="y2"))
             fig.update_layout(height=280, margin=dict(l=0, r=0, t=0, b=0),
                               xaxis_title="gradient step",
                               yaxis=dict(title="Huber loss"),
-                              yaxis2=dict(title="mean Q", overlaying="y", side="right"),
+                              yaxis2=dict(title="mean predicted reward", overlaying="y", side="right"),
                               legend=dict(orientation="h", y=1.15))
             st.plotly_chart(fig, use_container_width=True, key="room5_nettrain")
-            st.caption("Temporal difference loss and mean Q-value prediction per training step.")
+            st.caption("Temporal difference loss and mean predicted reward per training step.")
     g3, g4 = st.columns(2)
     with g3:
         st.markdown("###### Cumulative outcomes")

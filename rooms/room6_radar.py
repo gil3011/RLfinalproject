@@ -317,7 +317,7 @@ def render():
     escape_rate = 100 * esc[-100:].mean()
     coll_rate = 100 * coll.mean()
     to_rate = 100 * to.mean()
-    mean_q = stats["q_pred"][-200:].mean() if stats["q_pred"].size else float("nan")
+    mean_reward = stats["returns"][-100:].mean() if stats["returns"].size else float("nan")
 
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Escape rate (last 100)", f"{escape_rate:.0f}%",
@@ -330,8 +330,8 @@ def render():
     k4.metric("⏱️ Timed out", f"{to_rate:.0f}%",
               help="Share of training episodes that ran out of steps. Shown as −100 for "
                    "display, but unpenalized during training.")
-    k5.metric("Mean predicted Q", f"{mean_q:.2f}" if stats["q_pred"].size else "—",
-              help="The network's average value estimate over the last 200 training steps.")
+    k5.metric("Last 100 mean reward", f"{mean_reward:.1f}" if stats["returns"].size else "—",
+              help="Average undiscounted episode reward over the last 100 training episodes (scoreboard scale, ±100).")
 
     # view controls
     cps = bundle["checkpoints"]
@@ -469,14 +469,14 @@ def _graphs(stats):
             fig.add_trace(go.Scatter(x=gs, y=stats["loss"], mode="lines",
                                      line=dict(color="#e67e22", width=1), name="TD loss"))
             fig.add_trace(go.Scatter(x=gs, y=stats["q_pred"], mode="lines",
-                                     line=dict(color="#8e44ad", width=1), name="mean Q",
+                                     line=dict(color="#8e44ad", width=1), name="mean predicted reward",
                                      yaxis="y2"))
             fig.update_layout(height=280, margin=dict(l=0, r=0, t=0, b=0),
                               xaxis_title="gradient step", yaxis=dict(title="Huber loss"),
-                              yaxis2=dict(title="mean Q", overlaying="y", side="right"),
+                              yaxis2=dict(title="mean predicted reward", overlaying="y", side="right"),
                               legend=dict(orientation="h", y=1.15))
             st.plotly_chart(fig, use_container_width=True, key="room6_nettrain")
-            st.caption("Temporal-difference loss and mean predicted Q per gradient step.")
+            st.caption("Temporal-difference loss and mean predicted reward per gradient step.")
     g3, g4 = st.columns(2)
     with g3:
         st.markdown("###### Cumulative outcomes")
