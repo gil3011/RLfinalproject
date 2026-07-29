@@ -130,7 +130,8 @@ def dqn_control(
     optimizer = optim.Adam(policy_net.parameters(), lr=lr)
     buffer = ReplayBuffer(buffer_size)
 
-    returns = np.zeros(n_episodes)
+    returns = np.zeros(n_episodes)          # raw undiscounted (KPI / scoreboard scale)
+    returns_disc = np.zeros(n_episodes)     # discounted G — the -100 catch scored by WHEN
     steps = np.zeros(n_episodes, dtype=int)
     escaped = np.zeros(n_episodes, dtype=bool)
     caught = np.zeros(n_episodes, dtype=bool)
@@ -150,7 +151,7 @@ def dqn_control(
         eps = epsilon_at(k, eps_kind, eps_params)
         eps_log[k] = eps
         obs, _ = env.reset(seed=seed * 1_000_003 + k)
-        G, t = 0.0, 0
+        G, Gd, disc, t = 0.0, 0.0, 1.0, 0
         outcome = "timeout"
         while True:
             if random.random() < eps:
@@ -159,6 +160,8 @@ def dqn_control(
                 a = _greedy_action(policy_net, obs)
             nobs, r, term, trunc, info = env.step(a)
             G += r                                  # raw undiscounted return (scoreboard scale)
+            Gd += disc * r                          # discounted — a late catch's -100 fades toward 0
+            disc *= gamma
             t += 1
             # done for bootstrap = a real terminal (catch/escape), NOT truncation.
             buffer.push(
@@ -184,6 +187,7 @@ def dqn_control(
                 break
 
         returns[k] = G
+        returns_disc[k] = Gd
         steps[k] = t
         escaped[k] = outcome == "escaped"
         timeout[k] = outcome == "timeout"
@@ -200,9 +204,9 @@ def dqn_control(
             progress_cb(k + 1, n_episodes)
 
     env.close()
-    stats = {"returns": returns, "steps": steps, "outcome": outcomes,
-             "escaped": escaped, "caught": caught, "timeout": timeout,
-             "eps": eps_log, "loss": np.array(loss_log),
+    stats = {"returns": returns, "returns_disc": returns_disc, "steps": steps,
+             "outcome": outcomes, "escaped": escaped, "caught": caught,
+             "timeout": timeout, "eps": eps_log, "loss": np.array(loss_log),
              "q_pred": np.array(q_log)}
     return {"net_state": copy.deepcopy(policy_net.state_dict()),
             "hidden": hidden, "checkpoints": checkpoints, "stats": stats}
@@ -265,20 +269,25 @@ def q_field(net, enemies, arena=10.0, res=50):
     return xs, ys, q.reshape(res, res)
 
 
-def greedy_rollout(net, env, seed=None, options=None):
+def greedy_rollout(net, env, seed=None, options=None, gamma=1.0):
     """One greedy (ε=0) episode. Returns frames of agent/enemies positions, the
-    outcome, the raw undiscounted return, and the step count. Ephemeral — the
-    caller renders it and lets it go (never store in session state)."""
+    outcome, the raw undiscounted return, the DISCOUNTED return (`return_disc` — the
+    catch's -100 discounted to when it happened, for the scoreboard), and the step
+    count. Ephemeral — the caller renders it and lets it go (never store in session
+    state)."""
     obs, info = env.reset(seed=seed, options=options)
     frames = [{"agent": info["agent"].copy(), "enemies": info["enemies"].copy()}]
-    G, t, outcome = 0.0, 0, "timeout"
+    G, Gd, disc, t, outcome = 0.0, 0.0, 1.0, 0, "timeout"
     while True:
         a = _greedy_action(net, obs)
         obs, r, term, trunc, info = env.step(a)
         G += r
+        Gd += disc * r
+        disc *= gamma
         t += 1
         frames.append({"agent": info["agent"].copy(), "enemies": info["enemies"].copy()})
         if term or trunc:
             outcome = info.get("outcome") or ("timeout" if trunc else "caught")
             break
-    return {"frames": frames, "outcome": outcome, "return": G, "steps": t}
+    return {"frames": frames, "outcome": outcome, "return": G,
+            "return_disc": Gd, "steps": t}

@@ -106,7 +106,6 @@ def room_selector() -> int:
             ):
                 _go_to_room(room_number)
 
-    st.caption("Jump to any room — no need to finish one to move on.")
     st.markdown("---")
     return st.session_state["selected_room"]
 
@@ -114,40 +113,48 @@ def room_selector() -> int:
 def render_room_completion_controls(room_number: int) -> None:
     """Show the "continue to the next room" control at the bottom of a room.
 
-    No gating: the button is always available. Clicking it selects the next room
-    and scrolls to the top. The final room shows a closing note instead."""
+    The Continue button is always available on rooms 1-5: clicking it selects the
+    next room and scrolls to the top. The final room instead shows a closing note,
+    but only once that room has been TRAINED (its render sets
+    `room{n}_trained_sig` on ▶️ Train) — before that it shows nothing."""
     next_room = room_number + 1
     has_next = next_room in NAV_ROOMS
 
+    if not has_next:
+        # Final room: only celebrate once the user has actually TRAINED this room
+        # (its render sets `room{n}_trained_sig` on ▶️ Train). Before that, show
+        # nothing — no divider, no banner.
+        if st.session_state.get(f"room{room_number}_trained_sig") is not None:
+            st.markdown("---")
+            st.success("🎉 That's the last room — you've been through all six algorithms.")
+        return
+
     st.markdown("---")
-    if has_next:
-        # Blue "next room" button — scoped to this button's key so the other
-        # primary buttons (Train / Play) keep the theme's default colour.
-        st.markdown(
-            """<style>
-            [class*="st-key-continue_room_"] button {
-                background-color: #2563eb !important;
-                border-color: #2563eb !important;
-                color: #ffffff !important;
-            }
-            [class*="st-key-continue_room_"] button:hover {
-                background-color: #1d4ed8 !important;
-                border-color: #1d4ed8 !important;
-            }
-            [class*="st-key-continue_room_"] button:active,
-            [class*="st-key-continue_room_"] button:focus {
-                background-color: #1e40af !important;
-                border-color: #1e40af !important;
-            }
-            </style>""",
-            unsafe_allow_html=True,
-        )
-        if st.button(
-            f"Continue to {ROOMS[next_room]} →",
-            key=f"continue_room_{room_number}",
-            use_container_width=True,
-            type="primary",
-        ):
-            _go_to_room(next_room)
-    else:
-        st.success("🎉 That's the last room — you've been through all six algorithms.")
+    # Blue "next room" button — scoped to this button's key so the other
+    # primary buttons (Train / Play) keep the theme's default colour.
+    st.markdown(
+        """<style>
+        [class*="st-key-continue_room_"] button {
+            background-color: #2563eb !important;
+            border-color: #2563eb !important;
+            color: #ffffff !important;
+        }
+        [class*="st-key-continue_room_"] button:hover {
+            background-color: #1d4ed8 !important;
+            border-color: #1d4ed8 !important;
+        }
+        [class*="st-key-continue_room_"] button:active,
+        [class*="st-key-continue_room_"] button:focus {
+            background-color: #1e40af !important;
+            border-color: #1e40af !important;
+        }
+        </style>""",
+        unsafe_allow_html=True,
+    )
+    if st.button(
+        f"Continue to {ROOMS[next_room]} →",
+        key=f"continue_room_{room_number}",
+        use_container_width=True,
+        type="primary",
+    ):
+        _go_to_room(next_room)

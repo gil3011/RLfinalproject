@@ -6,10 +6,10 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
-from algorithms.dynamic_programming import policy_value, value_iteration
+from algorithms.dynamic_programming import policy_value
 from algorithms.temporal_difference import CONSTANT, DECAYING, sarsa_control
 from algorithms.monte_carlo import moving_average
-from core.episode import LOSS_SCORE, rollout, scored_return
+from core.episode import rollout
 from core.icy_grid import IcyGridWorld, generate_layout, generate_shields
 
 START = (9, 0)
@@ -52,14 +52,6 @@ def _train(blocked_t, ice_t, shields_t, slip, goal_reward, gamma, alpha,
         grid, gamma=gamma, alpha=alpha, n_episodes=episodes, max_steps=max_steps,
         eps_kind=eps_kind, eps_params=eps_params, seed=seed)
     return history, stats
-
-
-@st.cache_data(show_spinner=False)
-def _dp_optimal(blocked_t, ice_t, shields_t, slip, goal_reward, gamma):
-    """Exact V* for this board — the benchmark SARSA is measured against."""
-    grid = _make_grid(set(blocked_t), set(ice_t), set(shields_t), slip, goal_reward)
-    V, policy, _ = value_iteration(grid, gamma=gamma)
-    return V, policy
 
 
 @st.cache_data(show_spinner=False)
@@ -180,8 +172,11 @@ def _falls_curve(falls, view_ep):
     return fig
 
 
-def _returns_curve(returns, success, v_star_start, view_ep):
-    disp = np.where(success, returns, LOSS_SCORE)
+def _returns_curve(returns, view_ep):
+    # Every episode shows its REAL discounted return, no floor: a fall's -100 is
+    # discounted to when it happened (early falls sit lowest), a win shows the
+    # discounted +100 exit, and a timeout shows its raw return (≈ 0 here).
+    disp = returns
     n = len(disp)
     x = np.arange(1, n + 1)
     fig = go.Figure()
@@ -191,13 +186,11 @@ def _returns_curve(returns, success, v_star_start, view_ep):
     fig.add_trace(go.Scatter(
         x=x, y=moving_average(disp, _MA_WINDOW), mode="lines",
         line={"color": "#1d4ed8", "width": 2}, name=f"{_MA_WINDOW}-episode average"))
-    fig.add_hline(y=v_star_start, line_dash="dash", line_color="#ef4444",
-                  annotation_text=f"DP optimal V*(S) = {v_star_start:.1f}")
     fig.add_vline(x=view_ep, line_dash="dot", line_color="#f59e0b")
-    fig.update_yaxes(title="return (escape = real G · loss = -100)")
+    fig.update_yaxes(title="return (real discounted G)")
     fig.update_xaxes(title="episode")
     fig.update_layout(margin={"l": 10, "r": 10, "t": 48, "b": 10}, height=300,
-                      title="Episode score — climbs toward V*, losses floored at -100",
+                      title="Episode score — climbs as escapes increase, early falls score worst",
                       legend={"orientation": "h", "y": -0.2})
     return fig
 
@@ -240,7 +233,7 @@ def _env_controls():
         help="Chance of sliding perpendicular to the intended direction on ice. At 0, all detour caution is driven purely by SARSA's exploration risk. Above ~0.3 with dense ice, SARSA can learn the whole lower board is lethal and flee upward.")
     n_shields = st.slider("Shields 🛡️", 0, 2, 1,
         help="Pickups that grant permanent immunity to slipping. A strategic tradeoff: immunity vs. the discounting cost of detouring to grab it.")
-    st.caption(f"🕳️ Abyss falls score **{CLIFF_REWARD:+.0f}** and the exit scores **{GOAL_REWARD:+.0f}** — a 1:1 escape-vs-die ratio.")
+    st.caption(f"🕳️ An abyss fall pays a terminal **{CLIFF_REWARD:+.0f}** and the exit pays **{GOAL_REWARD:+.0f}** — a 1:1 ratio, each discounted by *when* it happens.")
     regen = st.button("🎲 Regenerate layout", use_container_width=True,
         help="Reshuffle walls, ice, and shields. The abyss, start, and exit never move.")
     return {"n_blocked": n_blocked, "n_slippery": n_slippery,
@@ -300,7 +293,7 @@ def render():
             "* **Step-by-Step Learning:** It updates $Q(s,a)$ toward $r + \\gamma Q(s',a')$ using the *actual* next action $a'$, including $\\epsilon$-greedy exploration noise.\n"
             "* **The Cliff Lesson:** Because SARSA knows it might take a random step next, standing near the abyss is genuinely dangerous to it. It learns a safer detour away from the edge (unlike Q-learning in Room 4, which assumes perfect future play).\n"
             "* **Shield State:** Shields permanently stop ice slipping and expand the state space to $(i, j, \\text{has\\_shield})$.\n"
-            "* **Usage:** Configure physics -> **🚀 Train** -> Compare the cautious learned policy against the exact DP optimal $V^*$."
+            "* **Usage:** Configure physics -> **🚀 Train** -> Watch the cautious learned policy and its value $V(S)$ evolve across checkpoints."
         )
 
     # --- Row 1: setup board + environment controls -------------------------- #
@@ -350,7 +343,6 @@ def render():
     with st.spinner(f"Running {episodes:,} episodes of SARSA…"):
         history, stats = _train(*keys, env["slip"], env["goal_reward"], gamma,
                                 alpha, episodes, max_steps, eps_kind, eps_params, 0)
-        V_star, _ = _dp_optimal(*keys, env["slip"], env["goal_reward"], gamma)
 
     if not history:
         st.warning("No episodes were run.")
@@ -410,7 +402,7 @@ def render():
     V_greedy = _learned_policy_value(*keys, env["slip"], env["goal_reward"],
                                      gamma, tuple(sorted(policy_s.items())))
     s0 = grid.start_state()
-    v_gre_start, v_star_start = V_greedy[s0], V_star[s0]
+    v_gre_start = V_greedy[s0]
     m4.metric("V(S) of this policy", f"{v_gre_start:.1f}",
               help="Actual model-evaluated value of the learned greedy policy from the start state.")
 
@@ -446,7 +438,7 @@ def render():
             time.sleep(_STEP_DELAY[speed])
 
         picked = any(grid.shield_of(s) for s in path)
-        score = scored_return(G_ep, outcome)
+        score = G_ep
         with episode_slot:
             if outcome == "goal":
                 st.success("🏁 Escaped! The agent crossed the ledge.")
@@ -456,11 +448,13 @@ def render():
                 st.warning("⏱️ Timed out before reaching the exit.")
             e1, e2, e3 = st.columns(3)
             e1.metric("Return G", f"{score:+.1f}",
-                help=f"Total discounted return. Assigns a flat {LOSS_SCORE:+.0f} if the agent falls or times out.")
+                help="The episode's real discounted return, scored like the +100 exit. A fall shows the discounted -100 it paid — an earlier fall scores worse — and a timeout shows its raw return (≈ 0).")
             e2.metric("Steps", len(path) - 1)
             e3.metric("Result", "✅" if outcome == "goal" else "❌")
-            if outcome != "goal":
-                st.caption(f"Scored as {LOSS_SCORE:+.0f}; raw discounted return was {G_ep:+.1f}.")
+            if outcome == "fell":
+                st.caption(f"Fell at step {len(path) - 1}, scored as its discounted return {G_ep:+.1f} — an earlier fall would score closer to {CLIFF_REWARD:+.0f}.")
+            elif outcome != "goal":
+                st.caption(f"Timed out — scored as its raw discounted return {G_ep:+.1f} (no terminal reward to earn).")
             if grid.shields:
                 st.caption("🛡️ Shield collected — no slipping." if picked else "🛡️ No shield collected — slipped the whole way.")
     else:
@@ -473,8 +467,8 @@ def render():
     # --- Learning curves ---------------------------------------------------- #
     st.plotly_chart(_falls_curve(falls, view_ep), use_container_width=True)
     st.caption("Falls level off as the ledge is learned, but never drop to zero while random exploration ($\epsilon > 0$) continues.")
-    st.plotly_chart(_returns_curve(returns, success, v_star_start, view_ep),
+    st.plotly_chart(_returns_curve(returns, view_ep),
                     use_container_width=True)
-    st.caption("Average returns climb as escapes increase. The remaining gap to $V^*$ reflects SARSA's deliberate caution and exploration noise.")
+    st.caption("Every episode shows its real discounted return, so an early plunge sits near $-100$ while a late fall or a timeout sits near $0$; the residual gap reflects SARSA's deliberate caution and exploration noise.")
     st.plotly_chart(_steps_curve(steps, success, view_ep), use_container_width=True)
     st.caption("Short runs early on are fatal falls into the abyss, not efficient shortcuts.")

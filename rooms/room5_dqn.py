@@ -12,7 +12,6 @@ from core.chase_arena import (
 )
 from algorithms.deep_q import dqn_control, load_net, q_field, greedy_rollout
 from algorithms.monte_carlo import CONSTANT, DECAYING, epsilon_at, moving_average
-from core.episode import LOSS_SCORE
 
 LEGEND = ("🤖 Start · 🏁 Exit · 🔴/🟠/🟣 Enemies (fatal on contact) · Field: blue = high Q, red = low Q")
 
@@ -256,7 +255,7 @@ def render():
     last = slice(-100, None)
     escape_rate = 100 * esc[last].mean()
     mean_steps = stats["steps"][-100:].mean() if stats["steps"].size else float("nan")
-    mean_reward = stats["returns"][-100:].mean() if stats["returns"].size else float("nan")
+    mean_return = stats["returns_disc"][-100:].mean() if stats["returns_disc"].size else float("nan")
 
     # ── Row 3 — training results ──
     # ... [keep calculation code identical] ...
@@ -267,11 +266,11 @@ def render():
     k2.metric("🔴 Caught (training)", f"{int(caught.sum()):,}",
               help="Total training episodes terminated by enemy contact.")
     k3.metric("⏱️ Timed out (training)", f"{int(timeout.sum()):,}",
-              help="Episodes reaching the step limit. Scored as −100 for display, but unpenalized during training.")
+              help="Episodes reaching the step limit without escaping or being caught. Unpenalized during training.")
     k4.metric("Last 100 mean steps per episode", f"{mean_steps:.1f}" if stats["steps"].size else "—",
               help="Average steps per episode over the last 100 training episodes (1 step = 1 m).")
-    k5.metric("Last 100 mean reward", f"{mean_reward:.1f}" if stats["returns"].size else "—",
-              help="Average undiscounted episode reward over the last 100 training episodes (scoreboard scale, ±100).")
+    k5.metric("Last 100 mean return", f"{mean_return:.1f}" if stats["returns_disc"].size else "—",
+              help="Average discounted episode return over the last 100 training episodes — the same scoring shown on the returns curve.")
 
     # view controls
     cps = bundle["checkpoints"]
@@ -317,7 +316,7 @@ def render():
     if play:
         # Play's enemy randomisation is its own toggle, independent of training's.
         play_env = ChaseArena(**{**env_kwargs, "random_enemies": play_random})
-        pr = greedy_rollout(net, play_env)          # unseeded → new spawn each press
+        pr = greedy_rollout(net, play_env, gamma=algo["gamma"])   # unseeded → new spawn each press
         frames = pr["frames"]
         # brief 3-2-1 countdown on the starting layout, so you can see where the
         # enemies begin before they move.
@@ -342,7 +341,10 @@ def render():
             time.sleep(_STEP_DELAY[speed_sel])
 
         won = pr["outcome"] == "escaped"
-        score = pr["return"] if won else LOSS_SCORE
+        # Real discounted return, no floor — scored like the +100 exit. A catch's -100 is
+        # discounted to when it happened (early ≈ -100, late ≈ 0); a timeout shows its raw
+        # discounted return (just the shaping it earned).
+        score = pr["return_disc"]
         with episode_slot:
             if won:
                 st.success("🏁 Escaped! Reached the exit.")
@@ -352,11 +354,13 @@ def render():
                 st.warning("⏱️ Timed out before reaching the exit.")
             e1, e2, e3 = st.columns(3)
             e1.metric("Return", f"{score:+.1f}",
-                help="Undiscounted return (+100 for exit plus shaping; flat −100 for caught or timeout).")
+                help="The episode's real discounted return, scored like the +100 exit. A catch shows the discounted -100 it paid — an earlier catch scores worse — and a timeout shows its raw discounted return.")
             e2.metric("Steps", pr["steps"], help="Distance traveled (1 step = 1 m).")
             e3.metric("Result", "✅" if won else "❌")  # Removed help
-            if not won:
-                st.caption(f"Display score floored at {LOSS_SCORE:+.0f} (raw return: {pr['return']:+.1f}).")
+            if pr["outcome"] == "caught":
+                st.caption(f"Caught at step {pr['steps']}, scored as its discounted return {pr['return_disc']:+.1f} — an earlier catch would score closer to −100.")
+            elif not won:
+                st.caption(f"Timed out — scored as its raw discounted return {pr['return_disc']:+.1f} (no exit reward earned).")
     else:
         trail = [(f["agent"][0], f["agent"][1]) for f in roll["frames"]]
         results_board.plotly_chart(
@@ -374,7 +378,9 @@ def _graphs(stats):
     outcome = np.array(stats["outcome"])
 
 
-    scored = np.where(stats["escaped"], stats["returns"], LOSS_SCORE)
+    # Every episode shows its real discounted return, no floor (early catch ≈ -100,
+    # late catch or timeout ≈ 0).
+    scored = stats["returns_disc"]
     g1, g2 = st.columns(2)
     with g1:
         st.markdown("###### Episode return (scored)")
@@ -390,25 +396,25 @@ def _graphs(stats):
         fig.update_layout(height=280, margin=dict(l=0, r=0, t=0, b=0),
                           xaxis_title="episode", yaxis_title="scored return")
         st.plotly_chart(fig, use_container_width=True, key="room5_returns")
-        st.caption("🟢 Escaped · 🔴 Caught · 🟠 Timed out. Losses display as −100 (display floor only; unpenalized during training).")
+        st.caption("🟢 Escaped · 🔴 Caught · 🟠 Timed out. Every episode shows its real discounted return (early catch ≈ −100, late catch or timeout ≈ 0) — no floor. Display only; training is unpenalized.")
 
     with g2:
         st.markdown("###### Network training")
         if stats["loss"].size:
-            gs = np.arange(1, len(stats["loss"]) + 1)
+            loss = stats["loss"]
+            gs = np.arange(1, len(loss) + 1)
+            w = max(20, len(loss) // 50)               # smoothing window scales with run length
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=gs, y=stats["loss"], mode="lines",
-                                     line=dict(color="#e67e22", width=1), name="TD loss"))
-            fig.add_trace(go.Scatter(x=gs, y=stats["q_pred"], mode="lines",
-                                     line=dict(color="#8e44ad", width=1), name="mean predicted reward",
-                                     yaxis="y2"))
+            fig.add_trace(go.Scatter(x=gs, y=loss, mode="lines",
+                                     line=dict(color="#e67e22", width=1), opacity=0.2,
+                                     name="raw", hoverinfo="skip"))
+            fig.add_trace(go.Scatter(x=gs, y=moving_average(loss, w), mode="lines",
+                                     line=dict(color="#e67e22", width=2), name="smoothed"))
             fig.update_layout(height=280, margin=dict(l=0, r=0, t=0, b=0),
                               xaxis_title="gradient step",
-                              yaxis=dict(title="Huber loss"),
-                              yaxis2=dict(title="mean predicted reward", overlaying="y", side="right"),
-                              legend=dict(orientation="h", y=1.15))
+                              yaxis=dict(title="Huber loss"), showlegend=False)
             st.plotly_chart(fig, use_container_width=True, key="room5_nettrain")
-            st.caption("Temporal difference loss and mean predicted reward per training step.")
+            st.caption(f"Temporal difference (Huber) loss per training step ({w}-step moving average; raw in faint).")
     g3, g4 = st.columns(2)
     with g3:
         st.markdown("###### Cumulative outcomes")

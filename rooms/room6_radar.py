@@ -6,8 +6,8 @@ friction), and the agent is PARTIALLY OBSERVED — it never sees obstacle coordi
 only its LIGHT: a lamp of radius `X` that reveals every obstacle within it — the agent
 gets the relative positions of all in-range obstacles (nothing in the disc is hidden),
 and nothing outside it. Obstacle layouts are re-sampled EVERY episode (with a fixed
-pillar always in the middle), so the headline metric is GENERALISATION: escape rate on
-held-out layouts training never saw.
+pillar always in the middle), so the agent must learn to generalise — avoid obstacles
+from its light rather than memorise one path.
 
 Reuses `algorithms/deep_q.py` unchanged (Double DQN + reward-scaling + dense
 straight-line shaping — Room 5's measured recipe). No value-field heatmap here: value
@@ -28,7 +28,6 @@ from core.radar_arena import (
 )
 from algorithms.deep_q import dqn_control, load_net
 from algorithms.monte_carlo import CONSTANT, DECAYING, moving_average
-from core.episode import LOSS_SCORE
 
 LEGEND = ("🤖 Start · 🏁 Exit · ⬤ Obstacles (fatal on contact; one always in the "
           "middle) · the dotted circle is the light radius X — obstacles inside it "
@@ -36,8 +35,7 @@ LEGEND = ("🤖 Start · 🏁 Exit · ⬤ Obstacles (fatal on contact; one alway
 
 _STEP_DELAY = {"Slow": 0.16, "Normal": 0.08, "Fast": 0.03}
 _EVAL_SEED = 4242            # a fixed held-out layout for the steady results board
-_GEN_SEED0 = 10_000_000     # generalisation eval seeds — a stream disjoint from training's
-_GEN_N = 150               # held-out layouts scored for the Generalisation Score
+_GEN_SEED0 = 10_000_000     # held-out eval seeds — a stream disjoint from training's
 
 
 # ───────────────────────── board figure ─────────────────────────
@@ -230,10 +228,10 @@ def render():
             "disc around the agent, which perceives the relative positions of *all* obstacles "
             "inside it — nothing in range is hidden, and everything outside is invisible. One "
             "obstacle is **always in the middle** of the room.\n"
-            "* **Generalisation is the point.** Obstacles are re-randomised every episode. "
-            "The headline **Generalisation Score** is the escape rate on *held-out* layouts "
-            "the network never trained on, so a high score means learned avoidance, not a "
-            "memorised path.\n"
+            "* **Generalisation is the point.** Obstacles are re-randomised every episode, so "
+            "the network must learn to avoid obstacles from its light, not memorise one path. "
+            "The **trajectory heatmap** aggregates greedy rollouts on *held-out* layouts to show "
+            "the routes it has learned to prefer.\n"
             "* **Light is center-to-center.** A reading is the distance to an obstacle's "
             "*centre*, capped at X — so it reveals sooner than it collides.\n"
             "* **Collision vs. timeout.** Hitting an obstacle scores −100 and *is* a real "
@@ -293,12 +291,6 @@ def render():
             reward_scale=0.01, double=True, seed=np.random.randint(1_000_000),
             progress_cb=_cb)
 
-        # Held-out Generalisation Score — DISJOINT seed stream from training.
-        prog.progress(1.0, text="Scoring generalisation on unseen layouts…")
-        net = load_net(bundle["net_state"], bundle["hidden"], obs_dim=obs_dim)
-        gen_esc, gen_coll, gen_to, _ = evaluate_policy(net, make_train_env,
-                                                       n_eval=_GEN_N, seed0=_GEN_SEED0)
-        bundle["gen"] = dict(escape=gen_esc, collide=gen_coll, timeout=gen_to)
         prog.empty()
         st.session_state["room6_bundle"] = bundle
         st.session_state["room6_trained_sig"] = sig
@@ -307,7 +299,6 @@ def render():
         return
     bundle = st.session_state["room6_bundle"]
     stats = bundle["stats"]
-    gen = bundle["gen"]
 
     # ── Row 3 — training results ──
     st.divider()
@@ -317,21 +308,18 @@ def render():
     escape_rate = 100 * esc[-100:].mean()
     coll_rate = 100 * coll.mean()
     to_rate = 100 * to.mean()
-    mean_reward = stats["returns"][-100:].mean() if stats["returns"].size else float("nan")
+    mean_return = stats["returns_disc"][-100:].mean() if stats["returns_disc"].size else float("nan")
 
-    k1, k2, k3, k4, k5 = st.columns(5)
+    k1, k2, k3, k4 = st.columns(4)
     k1.metric("Escape rate (last 100)", f"{escape_rate:.0f}%",
               help="Share of the last 100 TRAINING episodes that reached the exit.")
-    k2.metric("🎲 Generalisation score", f"{100*gen['escape']:.0f}%",
-              help=f"Escape rate on {_GEN_N} HELD-OUT layouts the network never trained on. "
-                   "This is the headline — learned avoidance, not memorisation.")
-    k3.metric("💥 Collision rate", f"{coll_rate:.0f}%",
+    k2.metric("💥 Collision rate", f"{coll_rate:.0f}%",
               help="Share of training episodes that ended by hitting an obstacle.")
-    k4.metric("⏱️ Timed out", f"{to_rate:.0f}%",
-              help="Share of training episodes that ran out of steps. Shown as −100 for "
-                   "display, but unpenalized during training.")
-    k5.metric("Last 100 mean reward", f"{mean_reward:.1f}" if stats["returns"].size else "—",
-              help="Average undiscounted episode reward over the last 100 training episodes (scoreboard scale, ±100).")
+    k3.metric("⏱️ Timed out", f"{to_rate:.0f}%",
+              help="Share of training episodes that ran out of steps without escaping or "
+                   "colliding. Unpenalized during training.")
+    k4.metric("Last 100 mean return", f"{mean_return:.1f}" if stats["returns_disc"].size else "—",
+              help="Average discounted episode return over the last 100 training episodes — the same scoring shown on the returns curve.")
 
     # view controls
     cps = bundle["checkpoints"]
@@ -392,7 +380,8 @@ def render():
         play_env = RadarArena(n_obstacles=play_count,
                               light_radius=env["light_radius"], friction=env["friction"],
                               obstacle_speed=env["obstacle_speed"], max_steps=150)
-        pr = greedy_rollout(net, play_env, seed=np.random.randint(_GEN_SEED0, 2**31 - 1))
+        pr = greedy_rollout(net, play_env, seed=np.random.randint(_GEN_SEED0, 2**31 - 1),
+                            gamma=algo["gamma"])
         frames = pr["frames"]
         for c in (3, 2, 1):
             results_board.plotly_chart(
@@ -413,7 +402,10 @@ def render():
             time.sleep(_STEP_DELAY[speed_sel])
 
         won = pr["outcome"] == "escaped"
-        score = pr["return"] if won else LOSS_SCORE
+        # Real discounted return, no floor — scored like the +100 exit. A collision's -100
+        # is discounted to when it happened (early ≈ -100, late ≈ 0); a timeout shows its
+        # raw discounted return (just the shaping it earned).
+        score = pr["return_disc"]
         with episode_slot:
             if won:
                 st.success("🏁 Escaped the chamber!")
@@ -423,11 +415,13 @@ def render():
                 st.warning("⏱️ Timed out before reaching the exit.")
             e1, e2, e3 = st.columns(3)
             e1.metric("Return", f"{score:+.1f}",
-                help="Undiscounted return (+100 for exit plus shaping; flat −100 for a loss).")
+                help="The episode's real discounted return, scored like the +100 exit. A collision shows the discounted -100 it paid — an earlier crash scores worse — and a timeout shows its raw discounted return.")
             e2.metric("Steps", pr["steps"])
             e3.metric("Result", "✅" if won else "❌")
-            if not won:
-                st.caption(f"Display score floored at {LOSS_SCORE:+.0f} (raw: {pr['return']:+.1f}).")
+            if pr["outcome"] == "collided":
+                st.caption(f"Crashed at step {pr['steps']}, scored as its discounted return {pr['return_disc']:+.1f} — an earlier crash would score closer to −100.")
+            elif not won:
+                st.caption(f"Timed out — scored as its raw discounted return {pr['return_disc']:+.1f} (no exit reward earned).")
     else:
         trail = [(f["agent"][0], f["agent"][1]) for f in roll["frames"]]
         last = roll["frames"][-1]        # final agent + obstacle positions (they match)
@@ -444,7 +438,9 @@ def render():
 
 def _graphs(stats):
     ep = np.arange(1, len(stats["returns"]) + 1)
-    scored = np.where(stats["escaped"], stats["returns"], LOSS_SCORE)
+    # Every episode shows its real discounted return, no floor (early collision ≈ -100,
+    # late collision or timeout ≈ 0).
+    scored = stats["returns_disc"]
     g1, g2 = st.columns(2)
     with g1:
         st.markdown("###### Episode return (scored)")
@@ -459,24 +455,26 @@ def _graphs(stats):
         fig.update_layout(height=280, margin=dict(l=0, r=0, t=0, b=0),
                           xaxis_title="episode", yaxis_title="scored return")
         st.plotly_chart(fig, use_container_width=True, key="room6_returns")
-        st.caption("🟢 Escaped · 🔴 Collided · 🟠 Timed out. Losses display as −100 "
-                   "(display floor only; unpenalized during training).")
+        st.caption("🟢 Escaped · 🔴 Collided · 🟠 Timed out. Every episode shows its real "
+                   "discounted return (early collision ≈ −100, late collision or timeout ≈ 0) "
+                   "— no floor. Display only — training is unpenalized.")
     with g2:
         st.markdown("###### Network training")
         if stats["loss"].size:
-            gs = np.arange(1, len(stats["loss"]) + 1)
+            loss = stats["loss"]
+            gs = np.arange(1, len(loss) + 1)
+            w = max(20, len(loss) // 50)               # smoothing window scales with run length
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=gs, y=stats["loss"], mode="lines",
-                                     line=dict(color="#e67e22", width=1), name="TD loss"))
-            fig.add_trace(go.Scatter(x=gs, y=stats["q_pred"], mode="lines",
-                                     line=dict(color="#8e44ad", width=1), name="mean predicted reward",
-                                     yaxis="y2"))
+            fig.add_trace(go.Scatter(x=gs, y=loss, mode="lines",
+                                     line=dict(color="#e67e22", width=1), opacity=0.2,
+                                     name="raw", hoverinfo="skip"))
+            fig.add_trace(go.Scatter(x=gs, y=moving_average(loss, w), mode="lines",
+                                     line=dict(color="#e67e22", width=2), name="smoothed"))
             fig.update_layout(height=280, margin=dict(l=0, r=0, t=0, b=0),
                               xaxis_title="gradient step", yaxis=dict(title="Huber loss"),
-                              yaxis2=dict(title="mean predicted reward", overlaying="y", side="right"),
-                              legend=dict(orientation="h", y=1.15))
+                              showlegend=False)
             st.plotly_chart(fig, use_container_width=True, key="room6_nettrain")
-            st.caption("Temporal-difference loss and mean predicted reward per gradient step.")
+            st.caption(f"Temporal-difference (Huber) loss per gradient step ({w}-step moving average; raw in faint).")
     g3, g4 = st.columns(2)
     with g3:
         st.markdown("###### Cumulative outcomes")

@@ -10,7 +10,7 @@ from algorithms.dynamic_programming import policy_value, value_iteration
 from algorithms.monte_carlo import moving_average
 from algorithms.temporal_difference import (CONSTANT, DECAYING, q_learning_control,
                                             sarsa_control)
-from core.episode import LOSS_SCORE, rollout, scored_return
+from core.episode import rollout
 from core.guard_grid import (CAUGHT_REWARD, CLIFF, CLIFF_REWARD, GOAL, GUARD_COL,
                              GuardGrid, LEDGE, START, make_track, place_coin)
 from core.icy_grid import generate_layout
@@ -188,9 +188,12 @@ def _falls_curve(falls_ql, falls_sa, view_ep):
     return fig
 
 
-def _returns_curve(returns_ql, success_ql, returns_sa, success_sa, v_star, view_ep):
-    disp_ql = np.where(success_ql, returns_ql, LOSS_SCORE)
-    disp_sa = np.where(success_sa, returns_sa, LOSS_SCORE)
+def _returns_curve(returns_ql, returns_sa, view_ep):
+    # Every episode shows its REAL discounted return, no floor: a fall/catch's -100 is
+    # discounted to when it happened (early deaths sit lowest), a win shows the
+    # discounted +100 exit, and a timeout shows its raw return (≈ 0).
+    disp_ql = returns_ql
+    disp_sa = returns_sa
     n = len(disp_ql)
     x = np.arange(1, n + 1)
     fig = go.Figure()
@@ -198,13 +201,11 @@ def _returns_curve(returns_ql, success_ql, returns_sa, success_sa, v_star, view_
         line={"color": _SA_COLOR, "width": 2}, name="SARSA (50-ep avg)"))
     fig.add_trace(go.Scatter(x=x, y=moving_average(disp_ql, _MA_WINDOW), mode="lines",
         line={"color": _QL_COLOR, "width": 2}, name="Q-learning (50-ep avg)"))
-    fig.add_hline(y=v_star, line_dash="dash", line_color="#111827",
-        annotation_text=f"DP optimal V*(S) = {v_star:.1f}")
     fig.add_vline(x=view_ep, line_dash="dot", line_color="#f59e0b")
-    fig.update_yaxes(title="return (escape = real G · loss = -100)")
+    fig.update_yaxes(title="return (real discounted G)")
     fig.update_xaxes(title="episode")
     fig.update_layout(margin={"l": 10, "r": 10, "t": 48, "b": 10}, height=300,
-        title="Episode score — losses floored at -100, both learners trained simultaneously",
+        title="Episode score — early deaths score worst, both learners trained simultaneously",
         legend={"orientation": "h", "y": -0.2})
     return fig
 
@@ -242,7 +243,7 @@ def _env_controls():
         help="Chance of sliding perpendicular to the intended direction on ice.")
     coin_value = st.slider("Coin value 🪙", 0, 20, 5, 1,
         help="Bonus reward for the ledge coin — the key contrast dial. At the default 5, exact-optimal DP SKIPS the coin but Q-learning greedily takes it (over-optimism); at ~8+ the coin is genuinely worth it and the contrast fades.")
-    st.caption(f"🕳️ Falls and 🚨 guard catches each score a flat **{LOSS_SCORE:+.0f}** on the scoreboard; the exit scores **{GOAL_REWARD:+.0f}**.")
+    st.caption(f"🕳️ Falls and 🚨 guard catches each pay a terminal **-100**; the exit pays **{GOAL_REWARD:+.0f}**. Both are discounted by *when* they happen, so the score reflects timing.")
     regen = st.button("🎲 Regenerate layout", use_container_width=True,
         help="Reshuffle walls, ice, and the coin. The abyss, guard patrol, and endpoints never move.")
     return {"n_blocked": n_blocked, "n_slippery": n_slippery, "slip": slip,
@@ -356,7 +357,7 @@ def render():
                                    max_steps, eps_kind, eps_params, 0)
         hist_sa, stats_sa = _train(_SA, *keys, *common, gamma, alpha, episodes,
                                    max_steps, eps_kind, eps_params, 0)
-        V_star, pi_star = _dp_optimal(*keys, *common, gamma)
+        _, pi_star = _dp_optimal(*keys, *common, gamma)   # DP policy → the coin comparison below
 
     if not hist_ql:
         st.warning("No episodes were run.")
@@ -364,7 +365,6 @@ def render():
 
     n_cp = len(hist_ql)
     s0 = grid.start_state()
-    v_star_start = V_star[s0]
 
     st.divider()
     st.markdown("#### Training results")
@@ -456,7 +456,7 @@ def render():
             time.sleep(_STEP_DELAY[speed])
 
         got_coin = grid.mask_of(path[-1]) > 0
-        score = scored_return(G_ep, outcome)
+        score = G_ep
         with episode_slot:
             if outcome == "goal":
                 st.success("🏁 Escaped! The agent crossed to the exit.")
@@ -468,11 +468,13 @@ def render():
                 st.warning("⏱️ Timed out before reaching the exit.")
             e1, e2, e3 = st.columns(3)
             e1.metric("Return G", f"{score:+.1f}",
-                help=f"Total discounted return. Assigns a flat {LOSS_SCORE:+.0f} if the agent falls, is caught, or times out.")
+                help="The episode's real discounted return, scored like the +100 exit. A fall or catch shows the discounted -100 it paid — an earlier death scores worse — and a timeout shows its raw return (≈ 0).")
             e2.metric("Steps", len(path) - 1)
             e3.metric("Result", "✅" if outcome == "goal" else "❌")
-            if outcome != "goal":
-                st.caption(f"Scored as {LOSS_SCORE:+.0f}; raw discounted return was {G_ep:+.1f}.")
+            if outcome in ("fell", "caught"):
+                st.caption(f"Died at step {len(path) - 1}, scored as its discounted return {G_ep:+.1f} — an earlier death would score closer to -100.")
+            elif outcome != "goal":
+                st.caption(f"Timed out — scored as its raw discounted return {G_ep:+.1f} (no terminal reward to earn).")
             if coin_cell is not None:
                 st.caption("🪙 Grabbed the coin on the ledge." if got_coin else "🪙 Left the coin — took the safer detour.")
     else:
@@ -484,11 +486,9 @@ def render():
     # --- Learning curves ---------------------------------------------------- #
     st.plotly_chart(_falls_curve(stats_ql["falls"], stats_sa["falls"], view_ep),
                     use_container_width=True, key="room4_falls")
-    st.plotly_chart(_returns_curve(stats_ql["returns"], stats_ql["success"],
-                                   stats_sa["returns"], stats_sa["success"],
-                                   v_star_start, view_ep),
-                    use_container_width=True, key="room4_returns")
-    st.caption("Every loss is floored at -100. Q-learning's average return is dragged down early on because it falls repeatedly while learning the ledge.")
+    st.plotly_chart(_returns_curve(stats_ql["returns"], stats_sa["returns"], view_ep),
+        use_container_width=True, key="room4_returns")
+    st.caption("Every episode shows its real discounted return: an early death sits near -100, while a late death or a timeout sits near 0. Q-learning's average is dragged down early on because it dies repeatedly while learning the ledge.")
     st.plotly_chart(_steps_curve(stats_ql["steps"], stats_sa["steps"], view_ep),
                     use_container_width=True, key="room4_steps")
     st.caption("Short early runs represent quick deaths (falls or guard catches), settling toward true path lengths as escape rates climb.")

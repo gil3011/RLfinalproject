@@ -9,7 +9,7 @@ import streamlit as st
 from algorithms.dynamic_programming import value_iteration
 from algorithms.monte_carlo import (CONSTANT, DECAYING, monte_carlo_control,
                                     moving_average)
-from core.episode import LOSS_SCORE, rollout, scored_return
+from core.episode import rollout
 from core.icy_grid import IcyGridWorld, generate_layout, generate_portals
 
 START = (9, 0)
@@ -382,7 +382,7 @@ def render():
             time.sleep(_STEP_DELAY[speed])
 
         portals_hit = sum(1 for k in range(len(path)) if landings[k] != path[k])
-        score = scored_return(G_ep, outcome)
+        score = G_ep
         with episode_slot:
             if outcome == "goal":
                 st.success("🏁 Escaped! The agent reached the exit.")
@@ -390,11 +390,9 @@ def render():
                 st.warning("⏱️ Timed out before reaching the exit.")
             e1, e2, e3 = st.columns(3)
             e1.metric("Return G", f"{score:+.1f}",
-                help=f"Total discounted return. Assigns a flat {LOSS_SCORE:+.0f} if the agent times out.")
+                help="The episode's real discounted return — the discounted +100 exit on a win, or its raw discounted return (≈ 0) on a timeout.")
             e2.metric("Steps", len(path) - 1)
             e3.metric("Result", "✅" if outcome == "goal" else "❌")
-            if outcome != "goal":
-                st.caption(f"Scored as {LOSS_SCORE:+.0f} for timing out; raw return was {G_ep:+.1f}.")
             if portals_hit:
                 st.caption(f"🌀 Sent back to start {portals_hit}× this run.")
     else:

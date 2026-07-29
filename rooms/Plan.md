@@ -618,8 +618,8 @@ shield machinery would tangle the shared class. Instead:
 
 **Graphs (full-width analytics row below the board):**
 
-* **Episode return (scored)** — per-episode return scatter with a moving-average line; every loss (caught **or** timed out) is floored to −100 in the DISPLAY, mirroring the Play scoreboard (Rooms 2–4 convention). Pure display transform — the learner updates off per-step rewards, never this.
-* **Network training** — TD loss (Huber) and mean predicted Q on a shared dual-axis plot, over gradient steps.
+* **Episode return (scored)** — per-episode return scatter with a moving-average line; each point is the episode's real discounted return with NO floor (a catch/collision shows the −100 discounted to when it happened, a timeout shows its raw ≈0 return), mirroring the Play scoreboard (all-rooms convention as of 2026-07-29). Pure display transform — the learner updates off per-step rewards, never this.
+* **Network training** — TD loss (Huber) per gradient step (loss only).
 * **Cumulative outcomes** — running totals of escaped / caught / timed-out.
 * **Exploration rate** — the ε schedule over episodes (Room 2's convention).
 

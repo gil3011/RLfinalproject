@@ -377,27 +377,32 @@ class RadarArena(gym.Env):
 
 # ── rollout helpers for the room (this env has obstacles + a light sensor, not
 #    enemies, so it needs its own rollout — deep_q.greedy_rollout is Chase-specific) ─
-def greedy_rollout(net, env, seed=None, options=None):
+def greedy_rollout(net, env, seed=None, options=None, gamma=1.0):
     """One greedy (ε=0) episode. Returns per-step frames (agent, vel, obstacles,
-    detected-mask) plus outcome / raw return / step count. Ephemeral — render and
-    drop it. Imports torch lazily so `radar_arena` stays importable without torch."""
+    detected-mask) plus outcome / raw return / DISCOUNTED return (`return_disc` — the
+    collision's -100 discounted to when it happened, for the scoreboard) / step count.
+    Ephemeral — render and drop it. Imports torch lazily so `radar_arena` stays
+    importable without torch."""
     import torch
     obs, info = env.reset(seed=seed, options=options)
     frames = [{"agent": info["agent"].copy(), "vel": info["vel"].copy(),
                "obstacles": info["obstacles"].copy(), "detected": info["detected"].copy()}]
-    G, t, outcome = 0.0, 0, "timeout"
+    G, Gd, disc, t, outcome = 0.0, 0.0, 1.0, 0, "timeout"
     while True:
         with torch.no_grad():
             a = int(net(torch.tensor(obs, dtype=torch.float32).unsqueeze(0)).argmax(1).item())
         obs, r, term, trunc, info = env.step(a)
         G += r
+        Gd += disc * r
+        disc *= gamma
         t += 1
         frames.append({"agent": info["agent"].copy(), "vel": info["vel"].copy(),
                        "obstacles": info["obstacles"].copy(), "detected": info["detected"].copy()})
         if term or trunc:
             outcome = info.get("outcome") or ("timeout" if trunc else "collided")
             break
-    return {"frames": frames, "outcome": outcome, "return": G, "steps": t}
+    return {"frames": frames, "outcome": outcome, "return": G,
+            "return_disc": Gd, "steps": t}
 
 
 def evaluate_policy(net, make_env, n_eval=200, seed0=0):

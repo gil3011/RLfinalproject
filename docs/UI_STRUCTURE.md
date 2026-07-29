@@ -17,7 +17,7 @@ needs.
 | `streamlit_app.py` | Entry point. Calls `configure_page()`, `room_selector()`, dispatches to `roomN_*.render()`. |
 | `core/layout.py` | `configure_page()` and `room_selector()`. **The sidebar holds only the room selector** — nothing else. |
 | `core/icy_grid.py` | `IcyGridWorld` — the shared discrete env for Rooms 1–4. Cell types: blocked / ice / passable-penalty / teleport / **pit** (terminal hazard) / **shield** (pickup that cancels slip). Generators: `generate_layout()`, `generate_portals()`, `generate_shields()`. |
-| `core/episode.py` | `rollout(grid, policy, gamma, max_steps)` — one stochastic episode; returns `(path, G, outcome)` with **discounted** `G = Σ γᵗ·r₍ₜ₊₁₎`. `outcome` is `"goal"` / **`"fell"`** (ended on a terminal hazard) / `"timeout"`. Pass `with_landings=True` for a 4th value: the pre-teleport landing cell of each step (Room 2's portal animation). Also `scored_return(G, outcome)` / `TIMEOUT_PENALTY` — the **scoreboard** number (see below). |
+| `core/episode.py` | `rollout(grid, policy, gamma, max_steps)` — one stochastic episode; returns `(path, G, outcome)` with **discounted** `G = Σ γᵗ·r₍ₜ₊₁₎`. `outcome` is `"goal"` / **`"fell"`** (ended on a terminal hazard) / `"timeout"`. Pass `with_landings=True` for a 4th value: the pre-teleport landing cell of each step (Room 2's portal animation). The on-screen **scoreboard** number is just this discounted `G`, with no floor (see below). |
 | `algorithms/*.py` | Algorithm implementations, **adapted from `code examples/`** (same math). Extended only to return per-iteration history and expose metrics. |
 | `rooms/roomN_*.py` | One module per room, each exposing a single `render()` function. |
 
@@ -82,23 +82,23 @@ needs.
   important distinction on that board. Give each cell type a colour that is distinct from
   the others **and** absent from `RdBu`, or it will blend into the value cells around it
   (Room 3: violet abyss, grey walls, blue ice, green shields, amber agent).
-- **Scoreboard ≠ maths.** `scored_return(G, outcome)` shows the real discounted `G`
-  on a win but a **flat −100 for ANY loss** (fell / caught / timed out), mirroring the
-  +100 goal, so escaping always ranks above every way of failing and all failures tie.
-  It deliberately breaks `G ≈ V(S)` and is for the player only: V, Q, learning updates,
-  and benchmarks must use the raw `G`. It **replaces** G with −100 rather than adding a
-  penalty, so it cannot double-count the −100 a fall/catch already paid (changed
-  2026-07-18 from the old "add penalty on timeout only" behaviour, at the user's request;
-  `LOSS_SCORE` in `core/episode.py`, with `TIMEOUT_PENALTY` kept as a back-compat alias).
-- **The returns CURVE now shows this scored view too (Rooms 3–4, added 2026-07-18).**
-  For player consistency ("−100 for a loss, in training as well"), the returns curve
-  floors every losing training episode to −100 in its **display**. This is a pure
-  display transform: the stored per-episode `stats["returns"]` stay raw, the learners
-  update off per-step rewards (never episode G), and V/Q/benchmark are untouched — so
-  the learned policy is bit-identical with or without it. Consequence to state honestly
-  in the caption: the moving average now sits below `V*` for *two* reasons (ε-caution
-  **and** the −100 loss floor), so it no longer reads as "mean return ≈ V^π". Room 2's
-  curve is still raw.
+- **Scoreboard = the real discounted return, no floor (changed 2026-07-29, at the user's
+  request; the flat −100 floor is fully gone).** The number shown for any episode is just its
+  real discounted `G`. A win shows the discounted +100 exit; a **fall / caught / collided**
+  shows the discounted −100 it paid, so an early death sits near −100 and a late one near 0
+  (mirroring how reaching the exit *sooner* is worth more); a **timeout** shows its raw
+  discounted return (≈ 0 on a board with no step cost), NOT a penalty. This matches the
+  LEARNER, which already discounts those same terminal rewards by γ in the Bellman backup —
+  so this was purely a display change. `scored_return` and the `LOSS_SCORE` / `TIMEOUT_PENALTY`
+  constants were **removed** from `core/episode.py`; rooms use the episode return `G` directly.
+- **The returns CURVE mirrors this (all rooms).** No losing episode is floored any more — every
+  point is the episode's real discounted return (early deaths lowest, late deaths and timeouts
+  near 0). Pure display transform: the learners update off per-step rewards, never episode `G`,
+  so the learned policy is bit-identical. For the DQL rooms the discounted per-episode return is
+  `stats["returns_disc"]` (the raw undiscounted `stats["returns"]` is kept for the ±100-scale
+  "mean reward" KPI). Consequence: the moving average now tracks `V^π` honestly (the residual
+  gap is ε-caution, not a scoring artefact). Room 2 has no death outcome; its curve was already
+  raw and is unchanged.
 - **Never move that penalty into the learning signal.** Measured in Room 3: at −100 it is
   a no-op; at −500 it collapses the room to 0% escape / 100% timeout. Timing out depends
   on elapsed steps `t`, which is not in the state — the cap is an artifact of training,
