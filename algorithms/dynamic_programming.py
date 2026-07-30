@@ -1,18 +1,3 @@
-"""
-Dynamic Programming for Room 1 — value iteration and policy iteration.
-
-Adapted from the reference `value_iteration.py` / `policy_iteration_*.py`,
-extended so BOTH algorithms return a per-iteration `history`: a list of
-snapshots {"V", "policy", "delta"}, one per iteration. This drives:
-  * the KPIs (iterations = len(history), final Δ = history[-1]["delta"]),
-  * the log-scale convergence curve ([h["delta"] for h in history]), and
-  * the "view policy at iteration k" scrubber.
-
-`delta` is the largest change in V during that iteration; it drives to 0 as the
-algorithm converges, for both methods.
-
-The convergence threshold theta is hardcoded at 1e-3 per the plan.
-"""
 from __future__ import annotations
 
 from core.icy_grid import ACTION_SPACE
@@ -45,10 +30,8 @@ def greedy_policy(grid, V, gamma, rewards=None):
 
 
 def value_iteration(grid, gamma: float = 0.9, theta: float = THETA, max_iters: int = 1000):
-    """Run value iteration, recording a snapshot after every sweep.
-
-    Returns (V, policy, history).
-    """
+    """Run value iteration, recording a snapshot per sweep. Returns
+    (V, policy, history)."""
     _, rewards = grid.get_transition_probs_and_rewards()
     states = grid.all_states()
     V = {s: 0.0 for s in states}
@@ -74,12 +57,8 @@ def value_iteration(grid, gamma: float = 0.9, theta: float = THETA, max_iters: i
 
 
 def policy_iteration(grid, gamma: float = 0.9, theta: float = THETA, max_iters: int = 1000):
-    """Run policy iteration, recording a snapshot after every improvement round.
-
-    Each round = full iterative policy evaluation of the current policy, then a
-    greedy improvement. `delta` for the round is the largest change in V since the
-    previous round's evaluated values. Returns (V, policy, history).
-    """
+    """Run policy iteration, recording a snapshot per improvement round (full
+    evaluation + greedy improvement). Returns (V, policy, history)."""
     _, rewards = grid.get_transition_probs_and_rewards()
     states = grid.all_states()
 
@@ -125,18 +104,8 @@ def policy_iteration(grid, gamma: float = 0.9, theta: float = THETA, max_iters: 
 
 def policy_value(grid, policy, gamma: float, theta: float = THETA,
                  max_iters: int = 10000):
-    """Exact expected discounted return of following `policy` — per state.
-
-    This is the same iterative policy evaluation `policy_iteration` runs
-    internally, exposed standalone so a room can ask "how good is this policy,
-    really?" about a policy that was learned WITHOUT a model (Room 2's MC).
-
-    That question can't be answered from the learner's own numbers: MC's
-    max_a Q(s,a) is the value of its epsilon-greedy self averaged over its whole
-    history, which understates the greedy policy it actually plays. Evaluating
-    the policy against the true model gives the honest answer. Benchmark only —
-    never fed back to the learner.
-    """
+    """Exact expected discounted return of following `policy`, per state, by
+    iterative policy evaluation against the true model. Benchmark only."""
     _, rewards = grid.get_transition_probs_and_rewards()
     V = {s: 0.0 for s in grid.all_states()}
     for _ in range(max_iters):
@@ -154,17 +123,9 @@ def policy_value(grid, policy, gamma: float, theta: float = THETA,
 
 
 def expected_steps_to_goal(grid, policy, tol: float = 1e-6, max_iters: int = 20000):
-    """Expected number of steps from the start to the goal under `policy`.
-
-    Solves the hitting-time equations t(s) = 1 + Σ_{s'} P(s'|s, π(s)) · t(s'),
-    with t(goal) = 0, by iteration (same shape as policy evaluation). Finite for
-    any policy that reaches the goal with probability 1 (e.g. the optimal one).
-
-    ONLY MEANINGFUL WHEN THE GOAL IS THE ONLY TERMINAL (Room 1). Every terminal
-    has t = 0, so on a board with pits this measures expected steps to ANY
-    absorption — counting a fatal fall as a fast arrival. Room 3 must not use it
-    as a "steps to exit" metric.
-    """
+    """Expected steps from start to goal under `policy`, solving the hitting-
+    time equations by iteration. Only meaningful when the goal is the only
+    terminal (Room 1)."""
     t = {s: 0.0 for s in grid.all_states()}
     for _ in range(max_iters):
         biggest = 0.0
@@ -181,14 +142,9 @@ def expected_steps_to_goal(grid, policy, tol: float = 1e-6, max_iters: int = 200
 
 
 def success_prob_within(grid, policy, max_steps: int):
-    """Probability the start reaches the goal within `max_steps` moves under
-    `policy`. Propagates the state distribution forward, absorbing goal mass.
-
-    Mass that lands on any OTHER terminal (a Room 3 pit) is dropped: that run is
-    over and can never reach the exit. Dropping it is not just bookkeeping — the
-    loop below indexes `policy[s]`, and a pit has no policy entry, so carrying
-    the mass forward would raise KeyError.
-    """
+    """Probability the start reaches the goal within `max_steps` under `policy`,
+    propagating the state distribution forward and absorbing goal mass (mass
+    landing on any other terminal is dropped)."""
     dist = {grid.start_state(): 1.0}
     reached = 0.0
     for _ in range(max_steps):

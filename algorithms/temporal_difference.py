@@ -1,41 +1,3 @@
-"""
-Temporal-Difference control for Room 3 — SARSA (on-policy).
-
-Adapted from `code examples/sarsa.py`, keeping its update exactly:
-
-    Q[s][a] += alpha * (r + gamma * Q[s2][a2] - Q[s][a])
-
-The whole room lives in that `Q[s2][a2]`. SARSA bootstraps off the action it
-will ACTUALLY take next — one drawn from the same epsilon-greedy policy it is
-following — so the risk of exploring near a cliff is priced into the value of
-standing near the cliff. Q-learning (Room 4) instead bootstraps off
-`max_a Q[s2][a]`, the action it *would* take if it never explored, which is why
-it will happily learn to walk the ledge and then fall off it while exploring.
-
-Deviations from the reference, all deliberate:
-
-* **No bootstrap off a terminal.** The reference's `while not grid.game_over()`
-  loop never forms a target from a terminal state. Room 3 has terminal pits as
-  well as a terminal goal, so both end the episode with `Q[s][a] += alpha*(r -
-  Q[s][a])`. Bootstrapping through a terminal's all-zero Q row would silently
-  damp the -100 fall toward zero and teach the agent that the abyss is cheap.
-* **Checkpointed history.** Snapshotting Q every episode is far too large for
-  `st.session_state`. Record ~50 evenly-spaced checkpoints of
-  {V, policy, eps, episode}; the room's scrubber ranges over checkpoints. Same
-  approach as `monte_carlo.py`.
-* **Seeded RNG.** The reference calls `np.random.*` globally. Thread an explicit
-  `default_rng(seed)` so training is reproducible across `st.cache_data`
-  evictions. The display/Play grid stays unseeded so each Play slips differently.
-* **Random tie-breaking** among equal-Q actions (the reference's `max_dict`
-  behaviour). With a cold, all-zero Q this is what makes early SARSA a random
-  walk rather than a march in whichever direction sorts first.
-* **Episode stats** (returns/steps/success/falls/eps) for the room's KPIs and
-  curves. The return G is DISCOUNTED, matching how V is defined, so the mean
-  return of a converged policy is comparable to V(S).
-
-The epsilon schedule is shared with Monte Carlo — same knob, same meaning, so it
-is imported rather than forked.
-"""
 from __future__ import annotations
 
 import numpy as np
@@ -66,14 +28,8 @@ def _epsilon_greedy(Q, s, eps, rng) -> str:
 
 
 def _snapshot(Q, rng):
-    """Greedy policy and V(s) = max_a Q(s,a) as they stand right now.
-
-    `rng` MUST be a separate generator from the training one. Tie-breaking draws
-    from it, so snapshotting off the training stream would let the checkpoint
-    schedule perturb the very run it is supposed to be observing — and since the
-    schedule is derived from n_episodes, a 2,000- and a 5,000-episode run would
-    silently diverge inside their common first 2,000 episodes.
-    """
+    """Greedy policy and V(s) = max_a Q(s,a) right now. `rng` must be separate
+    from the training generator so snapshotting can't perturb the run."""
     V, policy = {}, {}
     for s, q in Q.items():
         policy[s] = _argmax_random(q, rng)
@@ -93,27 +49,13 @@ def _td_control(
     seed: int = 0,
     n_checkpoints: int = 50,
 ):
-    """Shared TD-control loop. `kind` selects the bootstrap target and NOTHING else.
+    """Shared TD-control loop; `kind` selects only the bootstrap target — SARSA
+    uses Q[s2][a2] (action actually taken next), QLEARNING uses max_a Q[s2][a]
+    (greedy). Both behave identically otherwise.
 
-      SARSA     : target = Q[s2][a2] — the action actually taken next, so the
-                  risk of the agent's own future exploration is priced in.
-      QLEARNING : target = max_a Q[s2][a] — the greedy action, as if it would
-                  never explore again, so the ledge looks safe from a distance.
-
-    Both draw the NEXT action `a2` epsilon-greedily and take it (the behaviour
-    policy is identical); only what they bootstrap from differs. That is the
-    whole SARSA-vs-Q-learning lesson, and keeping it to one branch in one loop is
-    what guarantees the two are otherwise a controlled comparison — Room 3 was
-    burned by a harness that silently ran SARSA twice.
-
-    Returns (Q, policy, history, stats):
-      Q       : {state: {action: value}}
-      policy  : greedy policy at the END of training
-      history : ~`n_checkpoints` snapshots {V, policy, eps, episode}
-      stats   : per-episode arrays {returns, steps, success, falls, caught, eps}.
-                `caught` is always all-False on a grid with no guard (Room 3);
-                Room 4 reads it as its headline death count.
-    """
+    Returns (Q, policy, history, stats): history is ~`n_checkpoints` snapshots
+    {V, policy, eps, episode}; stats holds per-episode {returns, steps, success,
+    falls, caught, eps}."""
     assert kind in (SARSA, QLEARNING), f"unknown TD kind: {kind!r}"
     rng = np.random.default_rng(seed)
     # Observing a run must not change it — see _snapshot.
@@ -184,12 +126,7 @@ def sarsa_control(grid, **kwargs):
 
 
 def q_learning_control(grid, **kwargs):
-    """Off-policy TD control (Q-learning). Bootstraps off the greedy action.
-
-    Adapted from `code examples/q_learning.py`. Identical to SARSA except the
-    target is `max_a Q[s2][a]` instead of `Q[s2][a2]` — so it evaluates the
-    optimal policy while behaving epsilon-greedily. On Room 4's board it learns
-    to walk the ledge for the coin; the DP benchmark shows, per board, whether
-    that was brave or merely over-optimistic.
-    """
+    """Off-policy TD control (Q-learning). Identical to SARSA except the target
+    is `max_a Q[s2][a]`, so it evaluates the greedy policy while behaving
+    epsilon-greedily."""
     return _td_control(grid, QLEARNING, **kwargs)

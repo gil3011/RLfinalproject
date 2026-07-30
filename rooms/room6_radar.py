@@ -1,19 +1,3 @@
-"""
-Room 6 · Advanced DQL — Dynamic Obstacles & Light-based Vision.
-
-The step up from Room 5: momentum is back (actions set ACCELERATION under per-second
-friction), and the agent is PARTIALLY OBSERVED — it never sees obstacle coordinates,
-only its LIGHT: a lamp of radius `X` that reveals every obstacle within it — the agent
-gets the relative positions of all in-range obstacles (nothing in the disc is hidden),
-and nothing outside it. Obstacle layouts are re-sampled EVERY episode (with a fixed
-pillar always in the middle), so the agent must learn to generalise — avoid obstacles
-from its light rather than memorise one path.
-
-Reuses `algorithms/deep_q.py` unchanged (Double DQN + reward-scaling + dense
-straight-line shaping — Room 5's measured recipe). No value-field heatmap here: value
-depends on the light readings (the layout), so a 2-D max_a Q(x,y) slice would lie. The
-honest visuals are the live light (lit obstacles glow red) and the trajectory heatmap.
-"""
 from __future__ import annotations
 
 import time

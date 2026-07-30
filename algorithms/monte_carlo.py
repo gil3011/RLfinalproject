@@ -1,32 +1,3 @@
-"""
-Monte Carlo control for Room 2 — on-policy first-visit MC, epsilon-greedy.
-
-Adapted from the reference `monte_carlo_no_es.py`, keeping the same update math:
-an episode is generated with an epsilon-greedy policy, returns are accumulated
-backward as G = r_{t+1} + gamma*G, and each FIRST-visited (s, a) pair updates
-Q with the running-mean step size lr = 1/count, followed by a greedy policy
-improvement at that state. No exploring starts — exploration comes from epsilon.
-
-Deviations from the reference, and why:
-
-  * O(T) first-visit test. The reference re-scans the episode prefix with
-    `if (s, a) not in states_actions[:t]`, which is O(T^2) per episode — at this
-    room's ceiling (5,000 episodes x 500 steps) that is ~1e9 operations and
-    hangs the app. We precompute each pair's first-occurrence index instead:
-    `(s, a) not in states_actions[:t]` is true exactly when the pair's first
-    index equals t, so the semantics are identical.
-  * Seeded Generator. The reference calls the global `np.random.*`. We thread an
-    explicit Generator so a given configuration always trains identically, even
-    if Streamlit's cache evicts the result.
-  * Checkpointed history. Snapshotting Q every episode is far too large to hold
-    in session state, so we record ~`n_checkpoints` evenly-spaced snapshots of
-    {V, policy, eps, episode} to drive the episode scrubber.
-  * Per-episode stats (return / steps / success) are recorded for the learning
-    curves. The reference only plots Q deltas.
-
-Everything else — epsilon_greedy, play_game's (states, actions, rewards)
-alignment, max_dict's random tie-breaking — mirrors the reference.
-"""
 from __future__ import annotations
 
 import numpy as np
@@ -38,11 +9,8 @@ DECAYING = "Decaying ε"
 
 
 def epsilon_at(k: int, kind: str, params: tuple) -> float:
-    """Exploration rate for episode `k` (0-based).
-
-    CONSTANT : params = (eps,)
-    DECAYING : params = (eps_start, eps_min, decay) → max(eps_min, eps_start·decay^k)
-    """
+    """Exploration rate for episode `k` (0-based). CONSTANT: params = (eps,);
+    DECAYING: params = (eps_start, eps_min, decay)."""
     if kind == CONSTANT:
         return float(params[0])
     eps_start, eps_min, decay = params
@@ -65,13 +33,8 @@ def _epsilon_greedy(policy, s, eps, rng):
 
 
 def _play_game(grid, policy, eps, rng, max_steps):
-    """One episode under the epsilon-greedy policy.
-
-    Returns lists aligned exactly as the reference does:
-      states  = [s(0), s(1), ..., s(T-1), s(T)]
-      actions = [a(0), a(1), ..., a(T-1)     ]
-      rewards = [   0, R(1), ..., R(T-1), R(T)]
-    """
+    """One episode under the epsilon-greedy policy. Returns (states, actions,
+    rewards), with rewards[0] = 0 and each rewards[t+1] = R for states[t+1]."""
     s = grid.reset()
     a = _epsilon_greedy(policy, s, eps, rng)
 
@@ -100,14 +63,9 @@ def monte_carlo_control(
     seed: int = 0,
     n_checkpoints: int = 50,
 ):
-    """Run on-policy first-visit MC control.
-
-    Returns (Q, policy, history, stats).
-      history : list of {episode, V, policy, eps} checkpoints (scrubber).
-      stats   : dict of per-episode arrays {returns, steps, success, eps} where
-                `returns[k]` is the DISCOUNTED return from the start state, so it
-                is directly comparable to V and to Room 1's Play-Episode G.
-    """
+    """Run on-policy first-visit MC control. Returns (Q, policy, history, stats):
+    history is {episode, V, policy, eps} checkpoints; stats holds per-episode
+    {returns, steps, success, eps} (returns is the discounted return)."""
     rng = np.random.default_rng(seed)
 
     # Random initial policy over navigable, non-terminal cells (as reference).

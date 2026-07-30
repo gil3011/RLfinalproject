@@ -1,15 +1,3 @@
-"""
-Shared UI scaffolding used by every room.
-
-Keeps the app visually consistent per Plan.md:
-  * a top navigation bar of the six rooms (all freely accessible — no gating),
-  * a "Continue to the next room" button at the bottom of each room,
-  * minimal on-screen text; all parameter explanations live in `help=` tooltips.
-
-Rooms are NOT locked: the user can jump to any room at any time, and does not need
-to train or "complete" a room to move on. Navigating (via the nav bar or the
-Continue button) scrolls back to the top of the newly selected room.
-"""
 from __future__ import annotations
 
 import streamlit as st
@@ -37,15 +25,9 @@ def configure_page():
 
 
 def _scroll_to_top(nonce: int) -> None:
-    """Scroll the app back to the top. Streamlit keeps the scroll position across a
-    rerun, so after navigating from a bottom-of-page button the new room would open
-    scrolled down; this jumps it back up. Injected as a 0-height component whose JS
-    runs against the parent document (same-origin), covering the scroll container
-    across Streamlit versions.
-
-    `nonce` (incremented per navigation) is embedded so the component's HTML differs
-    every time — otherwise Streamlit reuses the identical iframe across reruns and
-    the script never re-fires."""
+    """Scroll the app back to the top after a navigation. `nonce` (bumped per
+    navigation) is embedded so the component's HTML differs each time and the
+    script re-fires."""
     components.html(
         f"""
         <script>
@@ -82,8 +64,7 @@ def _go_to_room(room_number: int) -> None:
 
 
 def room_selector() -> int:
-    """Render the top navigation bar (all rooms always accessible) and return the
-    selected room number."""
+    """Render the top navigation bar and return the selected room number."""
     st.session_state.setdefault("selected_room", 1)
 
     # If a navigation just happened, jump the view back to the top of the room.
@@ -112,11 +93,8 @@ def room_selector() -> int:
 
 def render_room_completion_controls(room_number: int) -> None:
     """Show the "continue to the next room" control at the bottom of a room.
-
-    The Continue button is always available on rooms 1-5: clicking it selects the
-    next room and scrolls to the top. The final room instead shows a closing note,
-    but only once that room has been TRAINED (its render sets
-    `room{n}_trained_sig` on ▶️ Train) — before that it shows nothing."""
+    Rooms 1-5 get a Continue button; the final room shows a closing note, but
+    only once it has been trained."""
     next_room = room_number + 1
     has_next = next_room in NAV_ROOMS
 

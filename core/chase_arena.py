@@ -1,50 +1,3 @@
-"""
-ChaseArena — Room 5's environment: an empty continuous arena with one or two
-enemies that chase the agent. Reach the exit (+100); an enemy touching you ends
-the episode at −100.
-
-This is a `gymnasium.Env` (unlike Rooms 1–4's tabular dict-MDPs), because Room 5
-is the Deep Q-Learning room: the network trains against the gymnasium 5-tuple API
-exactly as `code examples/dql` does (`reset -> (obs, info)`,
-`step -> (obs, reward, terminated, truncated, info)`).
-
-DESIGN (redesigned 2026-07-20, user) — see Plan.md §Room 5:
-  * Empty 10×10 m arena, NO walls, DIRECT inertia-free movement (the action IS the
-    displacement; there is no momentum, so the ice theme does not apply here).
-  * State `[x, y]` + per enemy `[eₓ−x, e_y−y]` (enemy RELATIVE to the agent),
-    normalised to the arena → `obs_dim = 2 + 2·n_enemies` (4 with one enemy, 6
-    with two). The enemies are given RELATIVE because the network must read where
-    they are, not memorise one path.
-  * 9 discrete actions = the 8 compass moves + stay, each 1 m (diagonals 1 m total,
-    ≈0.707 per axis). Fixed index order — the network's output layer is indexed by
-    it, so it must never be reordered.
-  * Enemy behaviours (`enemy_kinds`, each a function of OBSERVED state only, so the
-    env stays Markov): a **Chaser** (PURE PURSUIT — steps `enemy_speed` metres
-    straight at the agent's CURRENT position; myopic, so it can be baited) and, with
-    two enemies, a **Flanker** (pursues along a heading rotated `_FLANK_DEG` off the
-    direct line, so it curves in from the side). Two pure-pursuit enemies would
-    converge onto the same pursuit curve and move in lockstep; the flanker's rotated
-    approach keeps them apart and makes 2-enemy mode a real pincer. Two rejected
-    alternatives: an exit-guarding interceptor (measured — it camps the one place the
-    agent must reach and drops escape to ~1–7%, unwinnable), and lead pursuit that
-    predicts the agent's velocity (velocity is not in the observation, so it would
-    break the Markov property, the same reason the timeout penalty was rejected).
-
-THE AGENT ALWAYS STARTS AT THE CORNER; THE ENEMIES ARE WHAT VARY.
------------------------------------------------------------------
-The corner-to-corner run is the fixed lesson, so the agent always starts at
-`START` (bottom-left). What varies is the ENEMIES: with `random_enemies=True`
-(the default) they spawn at fresh random positions each `reset()`, kept clear of
-the agent so it is never an instant catch. That randomisation is what makes
-"escape rate" a smooth, measurable number AND what forces the network to actually
-read the relative-enemy inputs rather than memorise one path — over many
-placements a naive beeline escapes some and dies to others, while a good evasive
-policy escapes more, and that GAP is the learnable signal.
-
-With `random_enemies=False` the enemies sit at fixed spawns and, since the agent
-is fixed too, the whole episode is deterministic — a warm-up / demo mode where the
-network only has to solve one configuration.
-"""
 from __future__ import annotations
 
 import numpy as np
@@ -116,8 +69,7 @@ MOVES = _RAW / _NORM * STEP                          # shape (9, 2), each row a 
 
 def _min_dist_moving(a0, a1, e0, e1) -> float:
     """Closest approach between the agent (a0→a1) and an enemy (e0→e1) over one
-    step, both moving linearly. This is the SWEPT catch check — it stops the two
-    tunnelling past each other in a single 1 m step (endpoint checks miss that)."""
+    step (the swept catch check)."""
     w = a0 - e0
     v = (a1 - a0) - (e1 - e0)
     vv = float(v @ v)
@@ -128,9 +80,9 @@ def _min_dist_moving(a0, a1, e0, e1) -> float:
 
 
 class ChaseArena(gym.Env):
-    """Continuous chase arena for Room 5. Observation is `2 + 2·n_enemies`-D and
-    normalised; 9 discrete actions; 0–3 enemies (each a Chaser / Flanker / Ambusher),
-    any of which ends the episode on contact."""
+    """Continuous chase arena for Room 5. Normalised `2 + 2·n_enemies`-D
+    observation; 9 discrete actions; 0–3 enemies (Chaser / Flanker / Ambusher),
+    any ending the episode on contact."""
 
     metadata = {"render_modes": []}
 
@@ -179,10 +131,9 @@ class ChaseArena(gym.Env):
                 "outcome": outcome}
 
     def _enemy_move_dir(self, kind, e0, agent):
-        """Unit step direction for an enemy this step. Depends only on the enemy's
-        and agent's positions, so the dynamics stay Markov. The Chaser aims straight
-        at the agent; the Flanker and Ambusher rotate that heading (opposite signs,
-        different magnitudes) so they curve in from different sides."""
+        """Unit step direction for an enemy: the Chaser aims straight at the
+        agent; the Flanker and Ambusher rotate that heading to curve in from
+        different sides."""
         to_agent = agent - e0
         d = float(np.hypot(to_agent[0], to_agent[1]))
         if d < 1e-9:
@@ -195,8 +146,8 @@ class ChaseArena(gym.Env):
         return u
 
     def _sample_enemies(self, agent) -> np.ndarray:
-        """`n_enemies` random spawns in the central region, clear of the agent and
-        of each other."""
+        """`n_enemies` random spawns in the central region, clear of the agent
+        and of each other."""
         if self.n_enemies == 0:
             return np.zeros((0, 2), dtype=np.float64)
         placed = []

@@ -1,33 +1,3 @@
-"""
-Deep Q-Learning for Room 5 — adapted from `code examples/dql/dqn.py`.
-
-Keeps the reference's architecture and update: a small MLP `QNetwork`, a
-`ReplayBuffer`, a target network, Huber (SmoothL1) loss, `gather` on the taken
-action, gradient clipping at 10, Adam. Deviations, all deliberate and measured on
-`core/chase_arena.py`:
-
-* **Double DQN target.** A single-network DQN on this env diverged: traced greedy
-  policies loitered at the start with `max Q ≈ 6` in reward-units where the best
-  achievable return is ~2 — the value function overestimated ~3× and collapsed to
-  near-constant across states, so the policy went state-blind. Double DQN (select
-  the next action with the online net, evaluate it with the target net) is the
-  standard cure for exactly that overestimation, so Room 5 uses it. It is a
-  two-line change to the reference's target and nothing else.
-* **Reward scaling to the network.** The env pays ±100 (goal / catch) for the
-  scoreboard; training on ±100 made the targets large and the net unstable.
-  `reward_scale` (default 0.01) scales rewards *for the learner only* — the raw
-  ±100 is what the KPIs and the returns curve report.
-* **Episode-level epsilon shared with `monte_carlo.epsilon_at`** (CONSTANT /
-  DECAYING), so Room 5 means the same thing by ε as Rooms 2–4 rather than the
-  reference's step-count exponential decay.
-* **Checkpointed weights** (~`n_checkpoints` `state_dict` snapshots) so the room's
-  scrubber can replay the greedy policy — and its value field — as they improved.
-* **Per-episode stats** (return / steps / outcome / eps) for the KPIs and curves,
-  plus per-gradient-step loss and mean predicted Q for the training-diagnostics plot.
-
-Truncation (hitting the step cap) is NOT treated as terminal for bootstrapping —
-only an actual catch or escape ends the value backup, exactly as a timeout should.
-"""
 from __future__ import annotations
 
 import copy
@@ -108,16 +78,11 @@ def dqn_control(
     n_checkpoints: int = 40,
     progress_cb=None,
 ):
-    """Train a DQN on the gymnasium env returned by `make_env()`.
+    """Train a DQN (Double DQN + reward scaling) on the env from `make_env()`.
 
-    Returns a dict bundle (all plain numpy / python / state_dicts, safe for
-    `st.session_state`):
-      net_state   : final policy-net `state_dict`
-      hidden      : hidden width (to rebuild the net)
-      checkpoints : list of {episode, net_state} snapshots for the scrubber
-      stats       : per-episode {returns, steps, outcome, escaped, caught,
-                    timeout, eps} + per-grad-step {loss, q_pred}
-    """
+    Returns a dict bundle: net_state (final weights), hidden (net width),
+    checkpoints (per-snapshot weights for the scrubber), and stats (per-episode
+    returns/steps/outcome/eps + per-grad-step loss/q_pred)."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -248,10 +213,8 @@ def load_net(net_state, hidden, obs_dim=4, n_actions=9):
 
 
 def q_field(net, enemies, arena=10.0, res=50):
-    """max_a Q(x, y, ·) sampled on a `res×res` grid, holding the enemies fixed at
-    `enemies` (shape (n, 2)). Returns (xs, ys, Z) with Z[j, i] the value at
-    (xs[i], ys[j]) — a 2-D SLICE of the (2+2n)-D value function (the field really
-    depends on where the enemies are)."""
+    """max_a Q(x, y, ·) on a `res×res` grid with the enemies fixed at `enemies`.
+    Returns (xs, ys, Z) — a 2-D slice of the (2+2n)-D value function."""
     enemies = np.atleast_2d(np.asarray(enemies, dtype=np.float64))
     n = len(enemies)
     xs = np.linspace(0.0, arena, res)
@@ -270,11 +233,8 @@ def q_field(net, enemies, arena=10.0, res=50):
 
 
 def greedy_rollout(net, env, seed=None, options=None, gamma=1.0):
-    """One greedy (ε=0) episode. Returns frames of agent/enemies positions, the
-    outcome, the raw undiscounted return, the DISCOUNTED return (`return_disc` — the
-    catch's -100 discounted to when it happened, for the scoreboard), and the step
-    count. Ephemeral — the caller renders it and lets it go (never store in session
-    state)."""
+    """One greedy (ε=0) episode. Returns agent/enemy frames, outcome, raw return,
+    discounted return (`return_disc`), and step count."""
     obs, info = env.reset(seed=seed, options=options)
     frames = [{"agent": info["agent"].copy(), "enemies": info["enemies"].copy()}]
     G, Gd, disc, t, outcome = 0.0, 0.0, 1.0, 0, "timeout"

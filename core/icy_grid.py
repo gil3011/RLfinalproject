@@ -1,34 +1,3 @@
-"""
-IcyGridWorld — a 10x10 grid world with several special cell types.
-
-Shared discrete environment for Rooms 1-4. Cells come in these flavours:
-
-  * blocked  — walls the agent cannot step into (a move toward one keeps it put),
-  * ice      — slippery cells: a move slips perpendicular with prob `slip`,
-  * penalty  — passable cells that yield a negative reward each time they are
-               entered (NON-terminal; the agent walks on and keeps playing),
-  * teleport — cells that bounce the agent elsewhere the instant it lands on one
-               (Room 2's portal traps, which send it back to the start),
-  * pit      — TERMINAL hazard cells that end the episode with a negative reward
-               (Room 3's abyss: falling in is fatal, not a detour).
-
-The goal is terminal (reward `goal_reward`, +100 by default), and so is every
-pit. A pit needs no special reward machinery precisely BECAUSE it is terminal:
-the agent ends up standing on it, so the resulting-state reward lookup below
-carries its penalty like any other cell. Contrast a penalty on a *teleport*
-cell, which would be silently lost — see the warning on `rewards`.
-
-Transitions are generated programmatically and exposed in the same
-`.probs` / `.rewards` form the reference DP scripts expect.
-
-Teleports are **folded into `.probs`**: a transition that physically lands on a
-teleport cell is recorded as going straight to its destination. This keeps
-`.probs` a true Markov model, so the DP/TD math needs no notion of portals, and
-it makes a teleport cell *transient* — reachable-through but never occupied.
-`move()` still samples the PHYSICAL landing cell first and records it in
-`last_landing`, so an animation can show the agent touching the portal before it
-is whisked away (see `core.episode.rollout(..., with_landings=True)`).
-"""
 from __future__ import annotations
 
 import random
@@ -67,13 +36,8 @@ def step_cell(cell, a, rows, cols, blocked):
 
 
 def slip_outcomes(cell, a, rows, cols, blocked, slip):
-    """Distribution over the cell physically landed on, applying perpendicular slip.
-
-    `slip` is the total probability of slipping (split evenly across the two
-    perpendicular directions). Slip outcomes are added ONLY when `slip > 0`:
-    emitting zero-probability outcomes leaves landmines for anything that later
-    divides by an outcome's mass (see the Room 3 teleport-reward fold).
-    """
+    """Distribution over the cell physically landed on, splitting `slip` evenly
+    across the two perpendicular directions (added only when `slip > 0`)."""
     outcomes: dict[tuple[int, int], float] = {}
     intended = step_cell(cell, a, rows, cols, blocked)
     outcomes[intended] = outcomes.get(intended, 0.0) + (1.0 - slip)
@@ -85,51 +49,14 @@ def slip_outcomes(cell, a, rows, cols, blocked, slip):
 
 
 class IcyGridWorld:
-    """A grid with blocked walls, per-cell slippery ice, and passable penalties.
+    """A grid with blocked walls, per-cell slippery ice, passable penalties,
+    terminal pits, teleports, and optional shields. Shared discrete env for
+    Rooms 1-4.
 
-    Parameters
-    ----------
-    rows, cols  : board dimensions.
-    start       : (i, j) start cell.
-    goal        : (i, j) terminal goal cell — reward `goal_reward`.
-    blocked     : iterable of wall cells the agent cannot enter.
-    ice         : iterable of slippery cells. If None, EVERY navigable cell is icy
-                  (uniform-slip fallback for later rooms).
-    penalties   : dict {cell: reward} of passable negative-reward cells.
-    pits        : dict {cell: reward} of TERMINAL hazard cells — entering one
-                  ends the episode with that reward (Room 3's abyss). Like the
-                  goal, a pit is excluded from `.actions`: the episode is over,
-                  so the agent never chooses an action from it.
-    shields     : iterable of pickup cells. Collecting one makes the agent immune
-                  to slip FOR THE REST OF THE EPISODE. See the note on state
-                  shape below — this is the one option that changes what a state
-                  IS, so it is opt-in and off by default.
-    slip        : slip probability on ice cells.
-    goal_reward : terminal reward at the goal.
-    teleports   : dict {cell: destination} — landing on `cell` moves the agent to
-                  `destination` in the same step (Room 2's portals). Folded into
-                  `.probs`, so teleport cells are transient, never occupied.
-    rng         : numpy Generator used by move(); defaults to a fresh one. Pass a
-                  seeded generator for reproducible rollouts.
-
-    STATE SHAPE — read this before using `shields`
-    ----------------------------------------------
-    Without shields a state IS a cell: `(i, j)`. Every room up to Room 2 works
-    this way and is completely unaffected by the paragraph below.
-
-    A shield is *carried*, so with `shields` a state becomes `(i, j, k)` where
-    `k` is 1 once a shield has been picked up. This is not decoration: whether a
-    move slips depends on `k`, so `(i, j)` alone would NOT be Markov — two agents
-    on the same icy cell behave differently depending on what they collected ten
-    steps ago. Keying the model by the cell alone would leave DP computing a `V*`
-    that is quietly wrong (an average over "sometimes shielded"), and it would
-    hand the TD learners an unlearnable, self-contradicting target.
-
-    The algorithms need no changes for this: `value_iteration`, `policy_value`
-    and `sarsa_control` all treat a state as an opaque dict key. Only code that
-    reads coordinates out of a state has to care — use `cell_of(s)` /
-    `shield_of(s)` rather than unpacking, and `start_state()` rather than
-    `.start`, and such code works for both shapes.
+    Without shields a state is a cell `(i, j)`; with `shields` it becomes
+    `(i, j, k)` where `k` marks whether a shield (permanent slip immunity) has
+    been collected — needed for the state to stay Markov. Use `cell_of(s)` /
+    `shield_of(s)` and `start_state()` so code works for both shapes.
     """
 
     def __init__(
@@ -285,16 +212,9 @@ class IcyGridWorld:
         return step_cell((s[0], s[1]), a, self.rows, self.cols, self.blocked)
 
     def _build_probs(self):
-        """Build the transition model.
-
-        Returns (probs, phys):
-          * `phys[(s, a)]` — distribution over the cell physically landed on,
-            before any teleport fires. Used by move() so an animation can show
-            the agent touching a portal.
-          * `probs[(s, a)]` — the same distribution with teleports folded into
-            their destinations: the true Markov model the RL math consumes.
-        With no teleports the two are identical.
-        """
+        """Build the transition model, returning (probs, phys): `phys` is the
+        distribution over physical landing cells (before teleports), `probs` the
+        same with teleports folded into their destinations."""
         probs, phys = {}, {}
         for s in self.actions:  # navigable, non-terminal
             cell, k = self.cell_of(s), self.shield_of(s)
@@ -341,12 +261,8 @@ class IcyGridWorld:
 
     def move(self, action):
         """Take one stochastic step; return the reward of the resulting cell.
-
         Samples the physical landing cell (recorded in `last_landing`), then
-        applies any teleport. Sampling is a single uniform draw against a
-        precomputed cumulative distribution rather than `np.random.choice`,
-        which costs ~10us per call and dominates Room 2's ~1.5M training steps.
-        """
+        applies any teleport."""
         cells, cum = self._sampler[(self.current_state(), action)]
         idx = int(np.searchsorted(cum, self.rng.random() * cum[-1], side="right"))
         landed = cells[min(idx, len(cells) - 1)]
@@ -367,17 +283,8 @@ class IcyGridWorld:
 # ---------------------------------------------------------------------- #
 def _connected(start, goal, blocked, rows, cols, teleports=None, pits=None) -> bool:
     """True if `goal` is reachable from `start` avoiding blocked cells.
-
-    `teleports` (if given) is folded in exactly as the transition model folds it:
-    stepping onto a teleport cell continues from its destination instead. A
-    teleport is therefore never a state you can stand on, which means portals can
-    seal the exit off without walling it — see `generate_portals`.
-
-    `pits` are treated as IMPASSABLE, which is not the same as blocked: the agent
-    can very much enter a pit, it just never comes out — the episode ends there.
-    So a route "through" the abyss is not a route, and a reachability check that
-    walked over pits would happily certify an unsolvable board.
-    """
+    `teleports` are folded in (step onto one → continue from its destination);
+    `pits` are treated as impassable (a route through a pit is not a route)."""
     teleports = teleports or {}
     pits = set(pits or ())
     seen = {start}
@@ -412,27 +319,10 @@ def generate_layout(
     exclude=None,
     pits=None,
 ):
-    """Randomly place the three cell types on the board.
-
-    Blocked cells are placed one at a time and only kept if the start still
-    reaches the goal, so the board is always solvable. Slippery and negative
-    cells are sampled from the remaining free cells and are mutually exclusive.
-
-    `pits` is the set of cells the guaranteed route may NOT use. It must include
-    a board's real pits (Room 3's abyss), or the guard will certify a wall that
-    seals the only SAFE route because it found a "path" straight through the
-    chasm. A caller may add more cells to demand a route that avoids them too —
-    Room 3 adds the *ledge* so walls can never make hugging the cliff the only
-    way out. Marking cells here affects the GUARD only; they stay walkable in the
-    environment itself.
-
-    `exclude` keeps every type off cells already claimed by another room's
-    hazard (Room 3's abyss). Cosmetic for pits — a pit is terminal, so its
-    iciness never enters the model — but a cell drawn as two hazards at once
-    just reads as a bug. Mirrors `generate_portals`' argument of the same name.
-
-    Returns (blocked, ice, negatives) as sets of (i, j).
-    """
+    """Randomly place walls, ice, and negative cells, keeping the board
+    solvable (walls added only if start still reaches goal). `pits` marks cells
+    the guaranteed route may not use; `exclude` keeps every type off already-
+    claimed cells. Returns (blocked, ice, negatives) as sets of (i, j)."""
     rng = random.Random(seed)
     exclude = set(exclude or ())
     pits = set(pits or ())
@@ -466,18 +356,9 @@ def generate_shields(
     exclude=None,
     pits=None,
 ):
-    """Place Room 3's shield pickups.
-
-    A shield only means anything if the agent can get to it AND still get out,
-    so each candidate must be reachable from the start and able to reach the
-    goal — both without crossing a pit. An unreachable shield is not a hazard
-    (nothing breaks), it is just a lie drawn on the board: the user sees a way to
-    beat the ice that no policy can ever take.
-
-    Unlike walls, a shield never makes a board unsolvable, so there is no
-    incremental connectivity guard here — placement cannot fail. Returns a set
-    of (i, j), possibly smaller than `n_shields` if the board ran out of room.
-    """
+    """Place Room 3's shield pickups, each reachable from the start and able to
+    reach the goal without crossing a pit. Returns a set of (i, j), possibly
+    fewer than `n_shields` if the board ran out of room."""
     rng = random.Random(seed)
     exclude = set(exclude or ())
     pits = set(pits or ())
@@ -506,26 +387,10 @@ def generate_portals(
     goal: tuple[int, int] = (0, 9),
     exclude=None,
 ):
-    """Place Room 2's portal traps so they never seal the exit off.
-
-    Portals cannot use the plain `generate_layout` sampler. A portal is a
-    *transient* cell — landing on it teleports the agent away before it can act —
-    so a portal sitting on the only cell that leads into the goal makes the exit
-    unreachable even though nothing is walled, and the whole board silently
-    becomes unsolvable (V* collapses to 0 everywhere).
-
-    So portals are placed one at a time and kept only if the start still reaches
-    the goal through the FOLDED model — the same incremental guard
-    `generate_layout` already applies to walls.
-
-    `exclude` keeps portals off cells already claimed by another type (e.g. the
-    ice from `generate_layout`, which is sampled from an independent pool). This
-    is cosmetic — a portal cell is transient, so whether it is icy never affects
-    the model — but a cell drawn as two hazards at once just reads as a bug.
-
-    Returns a set of (i, j) — possibly fewer than `n_portals` if the rest would
-    have stranded the exit. Callers should surface the shortfall.
-    """
+    """Place Room 2's portal traps, one at a time, keeping each only if the
+    start still reaches the goal through the folded model (so a portal never
+    seals the exit off). `exclude` keeps portals off already-claimed cells.
+    Returns a set of (i, j), possibly fewer than `n_portals`."""
     rng = random.Random(seed)
     exclude = set(exclude or ())
     free = [s for s in ((i, j) for i in range(rows) for j in range(cols))
