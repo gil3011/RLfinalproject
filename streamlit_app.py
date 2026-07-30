@@ -1,16 +1,4 @@
-"""
-RL Escape Room — interactive Streamlit playground.
-
-A 6-room escape game where each room escalates the reinforcement-learning
-algorithm and the difficulty of a unifying slippery-ice environment. Rooms are
-built and enabled one at a time.
-"""
 import streamlit as st
-
-# Silence Streamlit's file-watcher crash on torch.classes. The watcher walks
-# every module's __path__._path to decide what to hot-reload on, and touching
-# torch.classes.__path__ raises a RuntimeError. Giving it an empty path list
-# makes the walk return nothing instead of throwing, while keeping hot-reload.
 try:
     import torch
 
@@ -42,5 +30,4 @@ elif room == 5:
 elif room == 6:
     room6_radar.render()
     render_room_completion_controls(6)
-else:
-    st.info(f"🚧 {ROOMS[room]} is not built yet — coming soon.")
+
