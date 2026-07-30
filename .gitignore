@@ -1,6 +1,9 @@
 # Reference material — baseline RL implementations we adapt from, not part of the app
 code examples/
 
+# Private local Obsidian vault — not for publishing
+docs/RL/
+
 # Python
 __pycache__/
 *.pyc
